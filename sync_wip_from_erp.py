@@ -13,7 +13,7 @@ import logging
 logging.basicConfig(level=logging.INFO,format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 # 工作表欄位定義
-WIP_HEADERS = ['餅乾代號', '製令單別', '製令單號', '在製品數量', '單位', '最後更新日期']
+WIP_HEADERS = ['餅乾代號', '餅乾品名', '製令單別', '製令單號', '在製品數量', '單位', '最後更新日期']
 
 def get_cookie_codes_from_index(sheets_helper: GoogleSheetsHelper) -> Set[str]:
     """從 Index 工作表取得需要同步的餅乾代號列表    
@@ -96,12 +96,25 @@ def sync_wip_inventory() -> bool:
             data_rows = existing_data[1:] if len(existing_data) > 1 else []
             key_to_index = {}
             for idx, row in enumerate(data_rows):
-                if len(row) >= 3 and row[0] and row[1] and row[2]:
+                # 兼容舊格式（沒有餅乾品名）和新格式（有餅乾品名）
+                if len(row) >= 3:
                     cookie_code = str(row[0]).strip()
-                    mo_type = str(row[1]).strip()
-                    mo_number = str(row[2]).strip()
-                    key = f"{cookie_code}|{mo_type}|{mo_number}"
-                    key_to_index[key] = idx            
+                    # 判斷是新格式（有餅乾品名）還是舊格式（沒有餅乾品名）
+                    if len(row) >= 4 and row[2] and row[3]:  # 新格式：製令單別在第3欄（索引2），製令單號在第4欄（索引3）
+                        mo_type = str(row[2]).strip()
+                        mo_number = str(row[3]).strip()
+                    elif len(row) >= 3 and row[1] and row[2]:  # 舊格式：製令單別在第2欄（索引1），製令單號在第3欄（索引2）
+                        mo_type = str(row[1]).strip()
+                        mo_number = str(row[2]).strip()
+                    else:
+                        continue
+                    if cookie_code and mo_type and mo_number:
+                        key = f"{cookie_code}|{mo_type}|{mo_number}"
+                        key_to_index[key] = idx            
+            # 取得 Index 字典以便查詢餅乾名稱
+            index_dict = sheets_helper.get_index_dict()
+            cookie_names = index_dict.get('餅乾', {})
+            
             # 準備所有要同步的資料（在記憶體中處理）
             processed_data = {}  # key: "餅乾代號|製令單別|製令單號", value: row_data
             updated_count = 0
@@ -112,10 +125,12 @@ def sync_wip_inventory() -> bool:
                 mo_number = str(item.get('mo_number', '')).strip()
                 if not cookie_code:
                     continue                
+                # 取得餅乾品名
+                cookie_name = cookie_names.get(cookie_code, '')
                 # 取得在製品數量
                 wip_qty = convert_qty_to_float(item.get('wip_qty', 0))
                 unit = str(item.get('unit', '片')).strip()
-                row_data = [cookie_code, mo_type, mo_number, wip_qty, unit, update_date]
+                row_data = [cookie_code, cookie_name, mo_type, mo_number, wip_qty, unit, update_date]
                 key = f"{cookie_code}|{mo_type}|{mo_number}"
                 # 記錄處理後的資料
                 if key in key_to_index:
@@ -129,13 +144,37 @@ def sync_wip_inventory() -> bool:
             final_data_dict = {}            
             # 先將現有資料加入字典（保留未被更新的現有資料）
             for idx, row in enumerate(data_rows):
-                if len(row) >= 3 and row[0] and row[1] and row[2]:
+                if len(row) >= 3 and row[0]:
                     cookie_code = str(row[0]).strip()
-                    mo_type = str(row[1]).strip()
-                    mo_number = str(row[2]).strip()
+                    # 判斷是新格式（有餅乾品名）還是舊格式（沒有餅乾品名）
+                    # 新格式：餅乾代號、餅乾品名、製令單別、製令單號、在製品數量、單位、最後更新日期
+                    # 舊格式：餅乾代號、製令單別、製令單號、在製品數量、單位、最後更新日期
+                    try:
+                        # 嘗試將 row[1] 轉成數字，如果成功則是舊格式
+                        float(row[1])
+                        # 舊格式：製令單別在第2欄（索引1），製令單號在第3欄（索引2）
+                        mo_type = str(row[1]).strip() if len(row) > 1 and row[1] else ''
+                        mo_number = str(row[2]).strip() if len(row) > 2 and row[2] else ''
+                    except (ValueError, TypeError):
+                        # 新格式：製令單別在第3欄（索引2），製令單號在第4欄（索引3）
+                        mo_type = str(row[2]).strip() if len(row) > 2 and row[2] else ''
+                        mo_number = str(row[3]).strip() if len(row) > 3 and row[3] else ''
+                    
+                    if not mo_type or not mo_number:
+                        continue
+                    
                     key = f"{cookie_code}|{mo_type}|{mo_number}"
-                    # 如果這個 key 不在處理後的資料中，保留原資料
+                    # 如果這個 key 不在處理後的資料中，保留原資料（但要補充餅乾品名）
                     if key not in processed_data:
+                        # 如果現有資料沒有餅乾品名欄位（舊資料），需要補充
+                        try:
+                            float(row[1])  # 如果能轉成數字，則是舊格式
+                            # 舊格式：需要插入餅乾品名
+                            cookie_name = cookie_names.get(cookie_code, '')
+                            row = [row[0], cookie_name] + row[1:]
+                        except (ValueError, TypeError):
+                            # 新格式：已經有餅乾品名，不需要處理
+                            pass
                         final_data_dict[key] = row            
             # 將處理後的資料加入字典（會覆蓋現有資料）
             for key, row_data in processed_data.items():
@@ -145,8 +184,8 @@ def sync_wip_inventory() -> bool:
             sorted_rows = sorted(final_data_dict.values(),
                 key=lambda row: (
                 str(row[0]).strip() if len(row) > 0 and row[0] else '',  # 餅乾代號
-                str(row[1]).strip() if len(row) > 1 and row[1] else '',  # 製令單別
-                str(row[2]).strip() if len(row) > 2 and row[2] else ''   # 製令單號
+                str(row[2]).strip() if len(row) > 2 and row[2] else '',  # 製令單別（調整索引）
+                str(row[3]).strip() if len(row) > 3 and row[3] else ''   # 製令單號（調整索引）
                 )
             )
             
