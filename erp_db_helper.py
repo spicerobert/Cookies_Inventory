@@ -166,6 +166,48 @@ class ERPDBHelper:
         
         return standardized
     
+    def get_wip_inventory(self) -> List[Dict[str, Any]]:
+        """
+        查詢在製品庫存（從 config.ini 讀取 SQL 查詢）
+        
+        Returns:
+            在製品資料列表，格式: [
+                {
+                    'cookie_code': 'COOKIE001',
+                    'wip_qty': 500.0,
+                    'unit': '片'
+                },
+                ...
+            ]
+        """
+        config = configparser.ConfigParser()
+        config.read(self.config_file, encoding='utf-8')
+        
+        if 'ERP_QUERIES' not in config:
+            raise ValueError("config.ini 中缺少 [ERP_QUERIES] 區段")
+        
+        query_config = config['ERP_QUERIES']
+        wip_sql = query_config.get('wip_inventory_query', '')
+        
+        if not wip_sql:
+            raise ValueError("config.ini 中缺少 wip_inventory_query 設定")
+        
+        logger.info("執行在製品庫存查詢")
+        results = self.execute_query(wip_sql)
+        
+        # 標準化欄位名稱
+        standardized = []
+        for row in results:
+            standardized.append({
+                'mo_number_type': str(row.get('mo_number_type', '')).strip(),
+                'mo_number': str(row.get('mo_number', '')).strip(),
+                'cookie_code': str(row.get('cookie_code', '')).strip(),
+                'wip_qty': row.get('wip_qty', 0),
+                'unit': str(row.get('unit', '片')).strip()
+            })
+        
+        return standardized
+    
     def close(self):
         """關閉資料庫連接"""
         if self.connection:
