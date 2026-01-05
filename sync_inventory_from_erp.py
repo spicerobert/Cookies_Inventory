@@ -1,7 +1,7 @@
 """從 ERP 系統同步餅乾庫存資料到 Google Sheets。功能說明：
 - 只同步 Index 工作表中存在的餅乾代號
 - 合併期初庫存（INVLC）和每日進出數量（INVLA）計算即時庫存
-- 支援多庫別（SP40, SP50, SP60）
+- 支援多庫別（SP40, SP50, SP60, SP80）
 - 自動將庫存數量統一轉換為「片」為單位（根據餅乾代號最後一碼換算）
 - 自動更新或新增庫存資料"""
 import sys
@@ -29,8 +29,8 @@ def get_cookie_codes_from_index(sheets_helper: GoogleSheetsHelper) -> Set[str]:
     return cookie_codes
 
 def filter_inventory_by_index(inventory_data: List[Dict[str, Any]],cookie_codes: Set[str]) -> List[Dict[str, Any]]:
-    """過濾庫存資料，只保留 Index 中存在的餅乾代號    
-    Args: inventory_data: 從 ERP 查詢到的庫存資料, cookie_codes: Index 工作表中的餅乾代號集合        
+    """過濾庫存資料，只保留 Index 中存在的餅乾代號  
+    Args: inventory_data: 從 ERP 查詢到的庫存資料, cookie_codes: Index 工作表中的餅乾代號集合
     Returns: 過濾後的庫存資料列表"""
     filtered = []
     skipped = 0    
@@ -44,8 +44,8 @@ def filter_inventory_by_index(inventory_data: List[Dict[str, Any]],cookie_codes:
     return filtered
 
 def build_row_mapping(existing_data: List[List[Any]]) -> Dict[str, int]:
-    """建立「餅乾代號+庫別代號」到行號的對應    
-    Args: existing_data: 現有工作表資料        
+    """建立「餅乾代號+庫別代號」到行號的對應
+    Args: existing_data: 現有工作表資料
     Returns: 字典：key 為 "餅乾代號|庫別代號"，value 為行號"""
     mapping = {}
     if len(existing_data) > 1:
@@ -58,22 +58,22 @@ def build_row_mapping(existing_data: List[List[Any]]) -> Dict[str, int]:
     return mapping
 
 def convert_qty_to_float(qty: Any) -> float:
-    """將庫存數量轉換為 float（Google Sheets API 需要可序列化的類型）    
-    Args: qty: 庫存數量（可能是 Decimal 或其他類型）        
+    """將庫存數量轉換為 float（Google Sheets API 需要可序列化的類型）
+    Args: qty: 庫存數量（可能是 Decimal 或其他類型）
     Returns: float 類型的庫存數量"""
     if hasattr(qty, '__float__'):
         return float(qty)
     return float(qty) if qty else 0.0
 
 def get_unit_conversion_factor(cookie_code: str) -> float:
-    """根據餅乾代號最後一碼取得單位換算倍數    
+    """根據餅乾代號最後一碼取得單位換算倍數
     換算規則：- C: 乘1, D: 乘2, H: 乘8, F: 乘4, A: 乘1, 其他: 乘1（預設） 
-    Args: cookie_code: 餅乾代號        
+    Args: cookie_code: 餅乾代號
     Returns: 換算倍數"""
     if not cookie_code:
-        return 1.0    
+        return 1.0
     last_char = cookie_code[-1].upper()
-    conversion_map = {'C': 1.0,'D': 2.0,'H': 8.0,'F': 4.0,'A': 1.0}    
+    conversion_map = {'C': 1.0,'D': 2.0,'H': 8.0,'F': 4.0,'A': 1.0}
     return conversion_map.get(last_char, 1.0)
 
 def convert_to_pieces(qty: float, cookie_code: str) -> float:
@@ -123,11 +123,11 @@ def sync_cookie_inventory() -> bool:
         # 連接 ERP 資料庫並查詢庫存
         with ERPDBHelper() as erp_db:
             logger.info("已連接到 ERP 資料庫")
-            logger.info("查詢 ERP 餅乾庫存資料...")
+            logger.info("查詢 ERP SP40, SP50, SP60, SP80 庫存資料...")
             inventory_data = erp_db.get_cookie_inventory()
-            logger.info(f"從 ERP 查詢到 {len(inventory_data)} 筆餅乾庫存資料")
+            logger.info(f"從 ERP 查詢到 {len(inventory_data)} 筆庫存資料(包含餅乾和包材)")
             if not inventory_data:
-                logger.warning("ERP 中未查詢到任何餅乾庫存資料")
+                logger.warning("ERP 中未查詢到任何庫存資料")
                 return False
             # 過濾：只保留 Index 中存在的餅乾代號
             filtered_inventory = filter_inventory_by_index(inventory_data, cookie_codes)
@@ -137,6 +137,9 @@ def sync_cookie_inventory() -> bool:
             # 準備更新資料
             update_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             worksheet = sheets_helper.get_worksheet('庫存狀態', create_if_not_exists=True)
+            if worksheet is None:
+                logger.error("無法取得或建立「庫存狀態」工作表")
+                return False
             # 只讀取一次現有資料
             logger.info("讀取現有庫存資料...")
             existing_data = sheets_helper.read_worksheet('庫存狀態')
@@ -150,23 +153,13 @@ def sync_cookie_inventory() -> bool:
             data_rows = existing_data[1:] if len(existing_data) > 1 else []
             code_warehouse_to_index = {}
             for idx, row in enumerate(data_rows):
-                # 兼容舊格式（沒有餅乾品名）和新格式（有餅乾品名）
-                if len(row) >= 3:
+                # 新格式：餅乾代號、餅乾品名、目前庫存數量、庫別代號、單位、最後更新日期
+                if len(row) >= 4 and row[0] and row[3]:
                     cookie_code = str(row[0]).strip()
-                    # 判斷是新格式（有餅乾品名）還是舊格式（沒有餅乾品名）
-                    if len(row) >= 4 and row[3]:  # 新格式：庫別代號在第4欄（索引3）
-                        warehouse_code = str(row[3]).strip()
-                    elif len(row) >= 3 and row[2]:  # 舊格式：庫別代號在第3欄（索引2）
-                        warehouse_code = str(row[2]).strip()
-                    else:
-                        continue
+                    warehouse_code = str(row[3]).strip()
                     if cookie_code and warehouse_code:
                         key = f"{cookie_code}|{warehouse_code}"
                         code_warehouse_to_index[key] = idx            
-            # 取得 Index 字典以便查詢餅乾名稱
-            index_dict = sheets_helper.get_index_dict()
-            cookie_names = index_dict.get('餅乾', {})
-            
             # 準備所有要同步的資料（在記憶體中處理）
             processed_data = {}  # key: "餅乾代號|庫別代號", value: row_data
             updated_count = 0
@@ -181,8 +174,8 @@ def sync_cookie_inventory() -> bool:
                 qty_in_pieces = convert_to_pieces(original_qty, original_cookie_code)                
                 # 標準化餅乾代號：將最後一碼統一改為 C
                 cookie_code = normalize_cookie_code(original_cookie_code)
-                # 取得餅乾品名
-                cookie_name = cookie_names.get(cookie_code, '')
+                # 從 ERP 查詢結果取得餅乾品名
+                cookie_name = str(item.get('cookie_name', '')).strip()
                 warehouse_code = str(item.get('warehouse_code', '')).strip()                
                 # 統一使用「片」作為單位
                 unit = '片'                
@@ -200,41 +193,16 @@ def sync_cookie_inventory() -> bool:
             final_data_dict = {}            
             # 先將現有資料加入字典（保留未被更新的現有資料）
             for idx, row in enumerate(data_rows):
-                if len(row) >= 3 and row[0]:
+                # 新格式：餅乾代號、餅乾品名、目前庫存數量、庫別代號、單位、最後更新日期
+                if len(row) >= 4 and row[0] and row[3]:
                     cookie_code = str(row[0]).strip()
-                    # 判斷是新格式（有餅乾品名）還是舊格式（沒有餅乾品名）
-                    # 新格式：餅乾代號、餅乾品名、目前庫存數量、庫別代號、單位、最後更新日期
-                    # 舊格式：餅乾代號、目前庫存數量、庫別代號、單位、最後更新日期
-                    if len(row) >= 4:
-                        # 判斷 row[1] 是餅乾品名（新格式）還是庫存數量（舊格式）
-                        try:
-                            float(row[1])  # 如果能轉成數字，則是舊格式
-                            # 舊格式：庫別代號在第3欄（索引2）
-                            warehouse_code = str(row[2]).strip() if len(row) > 2 and row[2] else ''
-                        except (ValueError, TypeError):
-                            # 新格式：庫別代號在第4欄（索引3）
-                            warehouse_code = str(row[3]).strip() if len(row) > 3 and row[3] else ''
-                    elif len(row) >= 3:
-                        # 舊格式：庫別代號在第3欄（索引2）
-                        warehouse_code = str(row[2]).strip() if row[2] else ''
-                    else:
-                        continue
-                    
+                    warehouse_code = str(row[3]).strip()
                     if not warehouse_code:
                         continue
                     
                     key = f"{cookie_code}|{warehouse_code}"
-                    # 如果這個 key 不在處理後的資料中，保留原資料（但要補充餅乾品名）
+                    # 如果這個 key 不在處理後的資料中，保留原資料
                     if key not in processed_data:
-                        # 如果現有資料沒有餅乾品名欄位（舊資料），需要補充
-                        try:
-                            float(row[1])  # 如果能轉成數字，則是舊格式
-                            # 舊格式：需要插入餅乾品名
-                            cookie_name = cookie_names.get(cookie_code, '')
-                            row = [row[0], cookie_name] + row[1:]
-                        except (ValueError, TypeError):
-                            # 新格式：已經有餅乾品名，不需要處理
-                            pass
                         final_data_dict[key] = row            
             # 將處理後的資料加入字典（會覆蓋現有資料）
             for key, row_data in processed_data.items():
@@ -253,7 +221,7 @@ def sync_cookie_inventory() -> bool:
             final_data = [headers] + sorted_rows            
             # 一次性批次寫入所有資料（只使用一次 API 請求）
             logger.info("批次寫入所有資料到 Google Sheets...")
-            if len(final_data) > 0:
+            if len(final_data) > 0 and worksheet is not None:
                 worksheet.clear()
                 num_cols = len(headers)
                 end_col = chr(ord('A') + num_cols - 1)

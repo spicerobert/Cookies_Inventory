@@ -1,20 +1,19 @@
 """餅乾庫存算料系統
 功能說明：
-- 從Google Sheets讀取今天的期初庫存（合併「庫存狀態」和「在製品庫存」工作表）
-  （注意：這兩個工作表的資料應該已經過手動調整）
+- 從Google Sheets讀取今天的期初庫存（從「庫存狀態」工作表）
+  （注意：此工作表的資料應該已經過手動調整）
 - 讀取BOM表、生產排程、組裝排程
 - 計算未來14天每一天每種餅乾的庫存數量
 - 檢測負庫存（餅乾不足）的情況
 - 輸出結果到Google Sheets
-
 執行流程：
-1. 先執行 sync_inventory_from_erp.py 和 sync_wip_from_erp.py 從ERP同步資料
-2. 手動調整 Google Sheets 中的「在製品庫存」和「庫存狀態」工作表
+1. 先執行 sync_inventory_from_erp.py 從ERP同步資料(或省略)
+2. 手動更新 Google Sheets 中的「庫存狀態」工作表
 3. 執行此程式計算未來14天的庫存預估
 """
 import sys
 from datetime import datetime, timedelta
-from typing import List, Dict, Set, Any, Tuple
+from typing import List, Dict, Set, Any, Tuple, Union, Optional
 from collections import defaultdict
 from google_sheets_helper import GoogleSheetsHelper
 import logging
@@ -22,8 +21,8 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 前置天數（投料到完工）
-LEAD_TIME_DAYS = 5
+# 前置天數（投料到完工入庫）
+LEAD_TIME_DAYS = 2
 
 # 計算天數
 FORECAST_DAYS = 14
@@ -33,93 +32,167 @@ FORECAST_DAYS = 14
 INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '當天入庫數量', '期末庫存', '是否負庫存', '缺口數量']
 SHORTAGE_ALERT_HEADERS = ['日期', '餅乾代號', '餅乾品名', '缺口數量', '當天組裝需求', '期初庫存', '當天入庫數量']
 
-def parse_date(date_str: Any) -> datetime:
-    """解析日期字串（Google Sheets標準格式：YYYY/MM/DD）    
-    Args: date_str: 日期字串（格式：YYYY/MM/DD）    
-    Returns: datetime 物件（時間設為00:00:00，只保留日期部分）"""
+def parse_date(date_str: Any) -> Optional[datetime]:
+    """解析日期字串（Google Sheets 格式：YYYY/M/D 或 YYYY/MM/DD）
+    
+    支援格式：YYYY/M/D（單數月份和日期，例如：2025/1/5）、YYYY/MM/DD（雙數月份和日期，例如：2025/01/05）
+    
+    Args:
+        date_str: 日期字串
+    
+    Returns:
+        datetime 物件（時間設為00:00:00，只保留日期部分），無法解析則返回 None
+    """
     if isinstance(date_str, datetime):
-        # 如果已經是datetime，只保留日期部分
-        return datetime(date_str.year, date_str.month, date_str.day)    
+        return normalize_date(date_str)
     if not date_str:
         return None
     
-    date_str = str(date_str).strip()    
-    # 只處理 Google Sheets 標準格式：YYYY/MM/DD
+    date_str = str(date_str).strip()
     try:
-        dt = datetime.strptime(date_str, '%Y/%m/%d')
-        return datetime(dt.year, dt.month, dt.day)  # 確保時間為00:00:00
-    except ValueError:
-        logger.warning(f"無法解析日期（期望格式：YYYY/MM/DD）: {date_str}")
-        return None
+        parts = date_str.split('/')
+        if len(parts) == 3:
+            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+            return normalize_date(datetime(year, month, day))
+    except (ValueError, IndexError):
+        pass
+    
+    logger.warning(f"無法解析日期（期望格式：YYYY/M/D 或 YYYY/MM/DD）: {date_str}")
+    return None
+
+def normalize_date(date: datetime) -> datetime:
+    """標準化日期（只取日期部分，時間設為00:00:00）"""
+    return datetime(date.year, date.month, date.day)
 
 def get_today_date() -> datetime:
     """取得今天的日期（只取日期部分，時間設為00:00:00）"""
-    today = datetime.now()
-    return datetime(today.year, today.month, today.day)
+    return normalize_date(datetime.now())
 
-def format_date(date: datetime) -> str:
+def get_header_index(headers: List[str], header_name: str, default: int = 0) -> int:
+    """取得標題欄位索引
+    Args: headers: 標題行列表, header_name: 欄位名稱, default: 預設索引（如果找不到欄位）
+    Returns: 欄位索引"""
+    return headers.index(header_name) if header_name in headers else default
+
+def format_date(date: Optional[datetime]) -> str:
     """格式化日期為 YYYY/MM/DD 字串
-    Args: date: datetime 物件    
-    Returns: 日期字串（格式：YYYY/MM/DD）"""
-    return date.strftime('%Y/%m/%d')
+    Args: date: datetime 物件或 None
+    Returns: 日期字串（格式：YYYY/MM/DD），如果為 None 則返回空字串"""
+    return date.strftime('%Y/%m/%d') if date else ''
 
-def read_initial_inventory(sheets_helper: GoogleSheetsHelper) -> Dict[str, float]:
-    """讀取今天的期初庫存（從Google Sheets讀取並合併「庫存狀態」和「在製品庫存」工作表）
+def _parse_numeric_string(value_str: str) -> str:
+    """移除千分位逗號並清理字串"""
+    return value_str.replace(',', '').strip()
+
+def parse_number(value: Any) -> int:
+    """將文字轉換為整數，處理千分位逗號格式
+    
+    例如："1,000" -> 1000, "-500" -> -500
+    
+    Args:
+        value: 要轉換的值（可能是文字、數字或 None）
+    
+    Returns:
+        轉換後的整數，如果無法轉換則返回 0
+    """
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    
+    value_str = str(value).strip()
+    if not value_str:
+        return 0
+    
+    try:
+        return int(float(_parse_numeric_string(value_str)))
+    except (ValueError, TypeError):
+        logger.warning(f"無法將 '{value}' 轉換為整數，使用 0")
+        return 0
+
+def parse_float(value: Any) -> float:
+    """將文字轉換為浮點數，處理千分位逗號格式
+    
+    例如："1,000.5" -> 1000.5, "-500.25" -> -500.25, "1,234.56" -> 1234.56
+    
+    Args:
+        value: 要轉換的值（可能是文字、數字或 None）
+    
+    Returns:
+        轉換後的浮點數，如果無法轉換則返回 0.0
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    value_str = str(value).strip()
+    if not value_str:
+        return 0.0
+    
+    try:
+        return float(_parse_numeric_string(value_str))
+    except (ValueError, TypeError):
+        logger.warning(f"無法將 '{value}' 轉換為浮點數，使用 0.0")
+        return 0.0
+
+def read_initial_inventory(sheets_helper: GoogleSheetsHelper) -> Dict[str, int]:
+    """讀取今天的期初庫存（從Google Sheets讀取「庫存狀態」工作表）
     說明：
-    - 此函數從Google Sheets讀取「庫存狀態」和「在製品庫存」工作表
-    - 這兩個工作表的資料應該已經過手動調整（可能先從ERP同步，再手動修改）
-    - 合併後的庫存數量 = 昨天結束後的期末庫存 = 今天早上的期初庫存
-    - 多庫別（SP40, SP50, SP60）會按餅乾代號合併加總
-    - 在製品庫存也會按餅乾代號加總後合併到庫存中
+    - 此函數從Google Sheets讀取「庫存狀態」工作表
+    - 此工作表的資料就是今天的期初庫存數量（例如：1/5的期初庫存）
+    - 此工作表的資料應該已經過手動調整（可能先從ERP同步，再手動修改）
+    - 多庫別（SP40, SP50, SP60, SP80）會按餅乾代號合併加總
+    - 會處理千分位逗號格式的數字（例如："1,000"）
+    - 包括負庫存數量也會正確處理和加總
     Args: sheets_helper: Google Sheets 輔助物件    
-    Returns: 字典：{餅乾代號: 庫存數量} - 今天的期初庫存"""
-    logger.info("從Google Sheets讀取今天的期初庫存（合併「庫存狀態」和「在製品庫存」工作表）...")
-    inventory = defaultdict(float)    
+    Returns: 字典：{餅乾代號: 庫存數量（整數）} - 今天的期初庫存"""
+    logger.info("從Google Sheets讀取今天的期初庫存（從「庫存狀態」工作表）...")
+    inventory = defaultdict(int)    
     # 讀取庫存狀態工作表（多庫別需要按餅乾代號合併加總）
     try:
         inventory_data = sheets_helper.read_worksheet('庫存狀態')
         if len(inventory_data) > 1:
             headers = inventory_data[0]
             # 找到欄位索引（新格式：餅乾代號、餅乾品名、目前庫存數量、庫別代號、單位、最後更新日期）
-            code_idx = headers.index('餅乾代號') if '餅乾代號' in headers else 0
-            qty_idx = headers.index('目前庫存數量') if '目前庫存數量' in headers else 2  # 調整索引：現在是第3欄（索引2）            
+            code_idx = get_header_index(headers, '餅乾代號', 0)
+            qty_idx = get_header_index(headers, '目前庫存數量', 2)
+            warehouse_idx = get_header_index(headers, '庫別代號', 3)
+            
+            processed_count = 0
+            skipped_count = 0
             for row in inventory_data[1:]:
                 if len(row) > max(code_idx, qty_idx):
-                    cookie_code = str(row[code_idx]).strip()
-                    try:
-                        qty = float(row[qty_idx]) if row[qty_idx] else 0.0
-                        if cookie_code:
-                            inventory[cookie_code] += qty
-                    except (ValueError, TypeError):
-                        continue            
-            logger.info(f"從「庫存狀態」工作表讀取到 {len([k for k, v in inventory.items() if v > 0])} 種餅乾的庫存")
+                    cookie_code = str(row[code_idx]).strip() if row[code_idx] else ''
+                    if not cookie_code:
+                        skipped_count += 1
+                        continue
+                    qty = parse_number(row[qty_idx])
+                    warehouse_code = str(row[warehouse_idx]).strip() if len(row) > warehouse_idx and row[warehouse_idx] else ''
+                    inventory[cookie_code] += qty
+                    processed_count += 1
+                    
+                    # 記錄詳細資訊（僅在 debug 模式下）
+                    if qty != 0:
+                        logger.debug(f"  餅乾代號: {cookie_code}, 庫別代號: {warehouse_code}, 庫存數量: {qty}")
+            
+            logger.info(f"處理了 {processed_count} 筆庫存記錄，跳過 {skipped_count} 筆（無餅乾代號）")
+            logger.info(f"從「庫存狀態」工作表讀取到 {len(inventory)} 種餅乾的庫存（已按餅乾代號合併加總）")
     except Exception as e:
         logger.warning(f"讀取「庫存狀態」工作表失敗: {e}")
-    
-    # 讀取在製品庫存工作表（需要按餅乾代號加總後合併）
-    try:
-        wip_data = sheets_helper.read_worksheet('在製品庫存')
-        if len(wip_data) > 1:
-            headers = wip_data[0]
-            # 找到欄位索引（新格式：餅乾代號、餅乾品名、製令單別、製令單號、在製品數量、單位、最後更新日期）
-            code_idx = headers.index('餅乾代號') if '餅乾代號' in headers else 0
-            qty_idx = headers.index('在製品數量') if '在製品數量' in headers else 4  # 調整索引：現在是第5欄（索引4）            
-            for row in wip_data[1:]:
-                if len(row) > max(code_idx, qty_idx):
-                    cookie_code = str(row[code_idx]).strip()
-                    try:
-                        qty = float(row[qty_idx]) if row[qty_idx] else 0.0
-                        if cookie_code:
-                            inventory[cookie_code] += qty
-                    except (ValueError, TypeError):
-                        continue            
-            logger.info(f"從「在製品庫存」工作表讀取資料（已合併到庫存中）")
-    except Exception as e:
-        logger.warning(f"讀取「在製品庫存」工作表失敗: {e}")
+        import traceback
+        traceback.print_exc()
     
     # 保留所有餅乾代號（包括數量為0的，因為可能後續有生產或需求）
     result = dict(inventory)
-    logger.info(f"今天的期初庫存總計：{len([k for k, v in result.items() if v > 0])} 種餅乾有庫存，總數量：{sum(result.values()):.0f} 片")
+    if result:
+        total_qty = sum(result.values())
+        positive_count = sum(1 for v in result.values() if v > 0)
+        negative_count = sum(1 for v in result.values() if v < 0)
+        zero_count = sum(1 for v in result.values() if v == 0)
+        logger.info(f"今天的期初庫存總計：{positive_count} 種餅乾有正庫存，{negative_count} 種餅乾有負庫存，{zero_count} 種餅乾為零庫存，總數量：{total_qty} 片")
     return result
 
 def read_bom(sheets_helper: GoogleSheetsHelper) -> Dict[str, Dict[str, float]]:
@@ -132,15 +205,15 @@ def read_bom(sheets_helper: GoogleSheetsHelper) -> Dict[str, Dict[str, float]]:
         bom_data = sheets_helper.read_worksheet('BOM')
         if len(bom_data) > 1:
             headers = bom_data[0]
-            box_code_idx = headers.index('禮盒代號') if '禮盒代號' in headers else 0
-            cookie_code_idx = headers.index('餅乾代號') if '餅乾代號' in headers else 1
-            qty_idx = headers.index('每盒片數') if '每盒片數' in headers else 2            
+            box_code_idx = get_header_index(headers, '禮盒代號', 0)
+            cookie_code_idx = get_header_index(headers, '餅乾代號', 1)
+            qty_idx = get_header_index(headers, '每盒片數', 2)            
             for row in bom_data[1:]:
                 if len(row) > max(box_code_idx, cookie_code_idx, qty_idx):
                     box_code = str(row[box_code_idx]).strip()
                     cookie_code = str(row[cookie_code_idx]).strip()
                     try:
-                        qty = float(row[qty_idx]) if row[qty_idx] else 0.0
+                        qty = parse_float(row[qty_idx])
                         if box_code and cookie_code and qty > 0:
                             bom[box_code][cookie_code] = qty
                     except (ValueError, TypeError):
@@ -152,42 +225,61 @@ def read_bom(sheets_helper: GoogleSheetsHelper) -> Dict[str, Dict[str, float]]:
     return dict(bom)
 
 def read_production_schedule(sheets_helper: GoogleSheetsHelper, today: datetime) -> Dict[datetime, Dict[str, float]]:
-    """讀取生產排程（排除今天的投料）    
-    Args:sheets_helper: Google Sheets 輔助物件,today: 今天的日期
-    Returns:字典：{完工入庫日期: {餅乾代號: 生產數量, ...}}"""
-    logger.info("讀取生產排程...")
+    """讀取生產排程（從今天開始之後的投料，包含今天）    
+    說明：
+    - 直接讀取「生產片數」欄位（不需要重新計算，因為應該已經由 sync_production_schedule.py 計算完成）
+    - 只讀取「日期」、「餅乾代號」、「生產片數」三個欄位    
+    計算邏輯：
+    - 生產排程日期（投料日期）+ 2天（前置天數）= 完工入庫日期
+    - 只讀取從今天開始之後的投料記錄（包含今天）
+    - 今天之前的投料排程計劃不計入（因為已經是過去式，這是動態算料系統）
+    - 例如：今天是1/5，則只計算1/5及之後的投料，1/3投料（1/5入庫）和1/4投料（1/6入庫）都不計入    
+    Args: sheets_helper: Google Sheets 輔助物件, today: 今天的日期
+    Returns: 字典：{完工入庫日期: {餅乾代號: 生產數量（片）, ...}}"""
+    logger.info("讀取生產排程（從今天開始之後的投料，包含今天）...")
     production = defaultdict(lambda: defaultdict(float))    
     try:
-        schedule_data = sheets_helper.read_worksheet('生產排程建議')
+        schedule_data = sheets_helper.read_worksheet('生產排程')
         if len(schedule_data) > 1:
             headers = schedule_data[0]
-            date_idx = headers.index('日期') if '日期' in headers else 0
-            cookie_code_idx = headers.index('餅乾代號') if '餅乾代號' in headers else 2
-            qty_idx = headers.index('建議生產數量_片') if '建議生產數量_片' in headers else 3
-            skipped_today = 0
+            # 只讀取必要的三個欄位：日期、餅乾代號、生產片數
+            date_idx = get_header_index(headers, '日期', 0)
+            cookie_code_idx = get_header_index(headers, '餅乾代號', 2)
+            pieces_qty_idx = get_header_index(headers, '生產片數', 5)
+            skipped_before_today = 0
+            skipped_no_pieces = 0
+            
             for row in schedule_data[1:]:
-                if len(row) > max(date_idx, cookie_code_idx, qty_idx):
+                if len(row) > max(date_idx, cookie_code_idx, pieces_qty_idx):
                     # 解析投料日期
                     production_date = parse_date(row[date_idx])
                     if not production_date:
                         continue
-                    # 排除今天的投料（因為已經包含在在製品庫存中）
-                    if production_date.date() == today.date():
-                        skipped_today += 1
-                        continue                    
-                    cookie_code = str(row[cookie_code_idx]).strip()
-                    try:
-                        qty = float(row[qty_idx]) if row[qty_idx] else 0.0
-                        if cookie_code and qty > 0:
-                            # 計算完工入庫日期 = 投料日期 + 5天
-                            completion_date = production_date + timedelta(days=LEAD_TIME_DAYS)
-                            # 標準化日期（只取日期部分，時間設為00:00:00）
-                            completion_date_key = datetime(completion_date.year, completion_date.month, completion_date.day)
-                            production[completion_date_key][cookie_code] += qty
-                    except (ValueError, TypeError):
+                    # 只讀取從今天開始之後的投料（包含今天）
+                    if production_date.date() < today.date():
+                        skipped_before_today += 1
                         continue
-            if skipped_today > 0:
-                logger.info(f"已排除今天的投料記錄 {skipped_today} 筆")
+                    
+                    cookie_code = str(row[cookie_code_idx]).strip() if row[cookie_code_idx] else ''
+                    if not cookie_code:
+                        continue
+                    
+                    try:
+                        qty_pieces = parse_float(row[pieces_qty_idx])
+                        if qty_pieces > 0:
+                            # 計算完工入庫日期 = 投料日期 + 2天（前置天數）
+                            completion_date = normalize_date(production_date + timedelta(days=LEAD_TIME_DAYS))
+                            production[completion_date][cookie_code] += qty_pieces
+                        else:
+                            skipped_no_pieces += 1
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"解析生產排程資料失敗（餅乾代號：{cookie_code}）: {e}")
+                        continue
+            
+            if skipped_before_today > 0:
+                logger.info(f"已排除今天之前的投料記錄 {skipped_before_today} 筆")
+            if skipped_no_pieces > 0:
+                logger.debug(f"跳過 {skipped_no_pieces} 筆生產片數為0或空的記錄")
             logger.info(f"讀取到 {len(production)} 天的生產排程（已轉換為完工入庫日期）")
     except Exception as e:
         logger.error(f"讀取生產排程失敗: {e}")
@@ -205,9 +297,9 @@ def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dic
         assembly_data = sheets_helper.read_worksheet('組裝計劃')
         if len(assembly_data) > 1:
             headers = assembly_data[0]
-            date_idx = headers.index('日期') if '日期' in headers else 0
-            box_code_idx = headers.index('禮盒代號') if '禮盒代號' in headers else 1
-            qty_idx = headers.index('計畫組裝數量') if '計畫組裝數量' in headers else 2
+            date_idx = get_header_index(headers, '日期', 0)
+            box_code_idx = get_header_index(headers, '禮盒代號', 1)
+            qty_idx = get_header_index(headers, '計畫組裝數量', 2)
             for row in assembly_data[1:]:
                 if len(row) > max(date_idx, box_code_idx, qty_idx):
                     # 解析組裝日期
@@ -216,10 +308,9 @@ def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dic
                         continue                    
                     box_code = str(row[box_code_idx]).strip()
                     try:
-                        box_qty = float(row[qty_idx]) if row[qty_idx] else 0.0
+                        box_qty = parse_float(row[qty_idx])
                         if box_code and box_qty > 0:
-                            # 標準化日期（只取日期部分，時間設為00:00:00）
-                            assembly_date_key = datetime(assembly_date.year, assembly_date.month, assembly_date.day)
+                            assembly_date_key = normalize_date(assembly_date)
                             # 使用BOM表展開為餅乾需求量
                             if box_code in bom:
                                 for cookie_code, pieces_per_box in bom[box_code].items():
@@ -235,81 +326,203 @@ def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dic
         raise    
     return dict(assembly)
 
-def calculate_inventory_forecast(
+def get_all_cookie_codes(
     initial_inventory: Dict[str, float],
+    production_schedule: Dict[datetime, Dict[str, float]],
+    assembly_schedule: Dict[datetime, Dict[str, float]]
+) -> Set[str]:
+    """取得所有需要計算的餅乾代號集合    
+    Args: initial_inventory: 期初庫存, production_schedule: 生產排程（完工入庫日期）, assembly_schedule: 組裝排程（餅乾需求量）
+    Returns: 所有餅乾代號的集合"""
+    all_cookies = set(initial_inventory.keys())
+    for schedule in production_schedule.values():
+        all_cookies.update(schedule.keys())
+    for schedule in assembly_schedule.values():
+        all_cookies.update(schedule.keys())
+    return all_cookies
+
+def calculate_daily_inventory(
+    date: datetime,
+    cookie_code: str,
+    current_inventory: Dict[str, float],
+    production_schedule: Dict[datetime, Dict[str, float]],
+    assembly_schedule: Dict[datetime, Dict[str, float]]
+) -> Tuple[float, float, float, float]:
+    """計算單一餅乾在特定日期的庫存變化
+    
+    計算邏輯：
+    - 期初庫存 = 前一天的期末庫存（第一天使用從「庫存狀態」工作表讀取的期初庫存）
+    - 當天組裝需求量 = 從組裝排程取得的當天組裝計劃所需的餅乾數量
+    - 當天完工入庫數量 = 從生產排程取得的當天預計要完工入庫的餅乾數量（生產排程日期 + 2天 = 完工入庫日期）
+    - 期末庫存 = 期初庫存 - 當天組裝計劃所需的餅乾 + 當天預計要完工入庫的餅乾
+    - 當天的期末庫存會轉為明天的期初庫存
+    
+    Args:
+        date: 計算日期
+        cookie_code: 餅乾代號
+        current_inventory: 當前庫存狀態（會更新，作為下一天的期初庫存）
+        production_schedule: 生產排程（完工入庫日期: {餅乾代號: 生產數量}）
+        assembly_schedule: 組裝排程（組裝日期: {餅乾代號: 需求量}）
+    
+    Returns:
+        (期初庫存, 當天入庫數量, 當天組裝需求, 期末庫存)
+    """
+    date_key = normalize_date(date)
+    beginning_qty = current_inventory.get(cookie_code, 0.0)
+    demand_qty = assembly_schedule.get(date_key, {}).get(cookie_code, 0.0)
+    completion_qty = production_schedule.get(date_key, {}).get(cookie_code, 0.0)
+    ending_qty = beginning_qty - demand_qty + completion_qty
+    current_inventory[cookie_code] = ending_qty
+    return beginning_qty, completion_qty, demand_qty, ending_qty
+
+def create_detail_row(
+    date: datetime,
+    cookie_code: str,
+    cookie_name: str,
+    beginning_qty: float,
+    completion_qty: float,
+    demand_qty: float,
+    ending_qty: float
+) -> List[Any]:
+    """建立庫存明細記錄
+    
+    Args:
+        date: 日期
+        cookie_code: 餅乾代號
+        cookie_name: 餅乾品名
+        beginning_qty: 期初庫存
+        completion_qty: 當天入庫數量
+        demand_qty: 當天組裝需求
+        ending_qty: 期末庫存
+    
+    Returns:
+        明細記錄列表
+    """
+    shortage_qty = abs(ending_qty) if ending_qty < 0 else 0.0
+    return [
+        format_date(date),
+        cookie_code,
+        cookie_name,
+        beginning_qty,
+        demand_qty,
+        completion_qty,
+        ending_qty,
+        '是' if ending_qty < 0 else '否',
+        shortage_qty
+    ]
+
+def create_shortage_row(
+    date: datetime,
+    cookie_code: str,
+    cookie_name: str,
+    shortage_qty: float,
+    demand_qty: float,
+    beginning_qty: float,
+    completion_qty: float
+) -> List[Any]:
+    """建立負庫存警示記錄
+    
+    Args:
+        date: 日期
+        cookie_code: 餅乾代號
+        cookie_name: 餅乾品名
+        shortage_qty: 缺口數量
+        demand_qty: 當天組裝需求
+        beginning_qty: 期初庫存
+        completion_qty: 當天入庫數量
+    
+    Returns:
+        負庫存警示記錄列表
+    """
+    return [
+        format_date(date),
+        cookie_code,
+        cookie_name,
+        shortage_qty,
+        demand_qty,
+        beginning_qty,
+        completion_qty
+    ]
+
+
+def calculate_inventory_forecast(
+    initial_inventory: Dict[str, Union[int, float]],
     production_schedule: Dict[datetime, Dict[str, float]],
     assembly_schedule: Dict[datetime, Dict[str, float]],
     today: datetime,
     cookie_names: Dict[str, str]
 ) -> Tuple[List[List[Any]], List[List[Any]]]:
     """計算未來14天的庫存預估    
-    Args:initial_inventory: 期初庫存,production_schedule: 生產排程（完工入庫日期）,assembly_schedule: 組裝排程（餅乾需求量）,today: 今天的日期,cookie_names: 餅乾名稱對應表
-    Returns:(庫存明細列表, 負庫存警示列表)"""
-    logger.info("開始計算未來14天的庫存預估...")    
+    計算邏輯：
+    - 從「庫存狀態」工作表讀取今天的期初庫存
+    - 逐日計算每種餅乾的庫存變化：
+      * 期初庫存 = 前一天的期末庫存（第一天使用從「庫存狀態」工作表讀取的期初庫存）
+      * 當天組裝需求量 = 從組裝排程取得的當天組裝計劃所需的餅乾數量
+      * 當天完工入庫數量 = 從生產排程取得的當天預計要完工入庫的餅乾數量（生產排程日期 + 2天 = 完工入庫日期）
+      * 期末庫存 = 期初庫存 - 當天組裝計劃所需的餅乾 + 當天預計要完工入庫的餅乾
+      * 當天的期末庫存會轉為明天的期初庫存（迭代計算）
+    - 檢測負庫存情況並產生警示
+    Args: initial_inventory: 期初庫存（從「庫存狀態」工作表讀取的今天的期初庫存）, production_schedule: 生產排程（完工入庫日期: {餅乾代號: 生產數量}，生產排程日期 + 2天 = 完工入庫日期）, assembly_schedule: 組裝排程（組裝日期: {餅乾代號: 需求量}）, today: 今天的日期, cookie_names: 餅乾名稱對應表
+    Returns: (庫存明細列表, 負庫存警示列表)"""
+    logger.info(f"開始計算未來 {FORECAST_DAYS} 天的庫存預估（前置天數：{LEAD_TIME_DAYS} 天）...")
+    
     detail_rows = []
-    shortage_rows = []    
+    shortage_rows = []
+    
     # 取得所有需要計算的餅乾代號
-    all_cookies = set(initial_inventory.keys())
-    for schedule in production_schedule.values():
-        all_cookies.update(schedule.keys())
-    for schedule in assembly_schedule.values():
-        all_cookies.update(schedule.keys())    
-    # 每天的庫存狀態：{日期: {餅乾代號: 期末庫存}}
-    daily_inventory = {}
-    current_inventory = initial_inventory.copy()    
-    # 逐日計算
+    all_cookies = get_all_cookie_codes(initial_inventory, production_schedule, assembly_schedule)
+    logger.info(f"需要計算的餅乾種類：{len(all_cookies)} 種")
+    
+    current_inventory = {k: float(v) for k, v in initial_inventory.items()}
+    
     for day_offset in range(FORECAST_DAYS):
         date = today + timedelta(days=day_offset)
-        date_key = datetime(date.year, date.month, date.day)        
-        daily_inventory[date_key] = {}        
-        # 對每一種餅乾計算
         for cookie_code in sorted(all_cookies):
-            # 期初庫存 = 前一天的期末庫存
-            beginning_qty = current_inventory.get(cookie_code, 0.0)            
-            # 當天預計完工入庫數量
-            completion_qty = production_schedule.get(date_key, {}).get(cookie_code, 0.0)            
-            # 當天組裝需求量
-            demand_qty = assembly_schedule.get(date_key, {}).get(cookie_code, 0.0)            
-            # 期末庫存 = 期初 + 完工入庫 - 組裝需求
-            ending_qty = beginning_qty + completion_qty - demand_qty            
-            # 更新當前庫存（作為下一天的期初庫存）
-            current_inventory[cookie_code] = ending_qty
-            daily_inventory[date_key][cookie_code] = ending_qty            
-            # 判斷是否負庫存
-            is_shortage = ending_qty < 0
-            shortage_qty = abs(ending_qty) if is_shortage else 0.0            
-            # 取得餅乾品名
+            beginning_qty, completion_qty, demand_qty, ending_qty = calculate_daily_inventory(
+                date, cookie_code, current_inventory, production_schedule, assembly_schedule
+            )
+            
             cookie_name = cookie_names.get(cookie_code, '')
+            detail_rows.append(create_detail_row(
+                date, cookie_code, cookie_name,
+                beginning_qty, completion_qty, demand_qty, ending_qty
+            ))
             
-            # 建立明細記錄
-            # 欄位順序：日期、餅乾代號、餅乾品名、期初庫存、當天組裝需求、當天入庫數量、期末庫存、是否負庫存、缺口數量
-            detail_rows.append([
-                format_date(date),      # 日期（YYYY/MM/DD）
-                cookie_code,
-                cookie_name,            # 餅乾品名
-                beginning_qty,          # 期初庫存
-                demand_qty,             # 當天組裝需求
-                completion_qty,         # 當天入庫數量
-                ending_qty,             # 期末庫存
-                '是' if is_shortage else '否',
-                shortage_qty
-            ])
-            
-            # 如果是負庫存，加入警示列表
-            if is_shortage:
-                shortage_rows.append([
-                    format_date(date),  # 日期（YYYY/MM/DD）
-                    cookie_code,
-                    cookie_name,        # 餅乾品名
-                    shortage_qty,
-                    demand_qty,         # 當天組裝需求
-                    beginning_qty,      # 期初庫存
-                    completion_qty      # 當天入庫數量
-                ])
+            if ending_qty < 0:
+                shortage_rows.append(create_shortage_row(
+                    date, cookie_code, cookie_name,
+                    abs(ending_qty), demand_qty, beginning_qty, completion_qty
+                ))
     
     logger.info(f"計算完成：共 {len(detail_rows)} 筆明細記錄，{len(shortage_rows)} 筆負庫存警示")
     return detail_rows, shortage_rows
 
+
+def write_worksheet_data(
+    sheets_helper: GoogleSheetsHelper,
+    worksheet_name: str,
+    headers: List[str],
+    rows: List[List[Any]]
+) -> None:
+    """將資料寫入指定的工作表
+    
+    Args:
+        sheets_helper: Google Sheets 輔助物件
+        worksheet_name: 工作表名稱
+        headers: 標題行
+        rows: 資料行列表
+    """
+    worksheet = sheets_helper.get_worksheet(worksheet_name, create_if_not_exists=True)
+    if worksheet is None:
+        raise ValueError(f"無法取得或建立「{worksheet_name}」工作表")
+    
+    all_data = [headers] + rows
+    worksheet.clear()
+    if len(all_data) > 0:
+        num_cols = len(headers)
+        end_col = chr(ord('A') + num_cols - 1)
+        range_name = f'A1:{end_col}{len(all_data)}'
+        worksheet.update(range_name=range_name, values=all_data)
 
 def write_results(
     sheets_helper: GoogleSheetsHelper,
@@ -317,43 +530,18 @@ def write_results(
     shortage_rows: List[List[Any]]
 ):
     """將計算結果寫入Google Sheets
-    
-    Args:
-        sheets_helper: Google Sheets 輔助物件
-        detail_rows: 庫存明細列表
-        shortage_rows: 負庫存警示列表
-    """
+    Args: sheets_helper: Google Sheets 輔助物件, detail_rows: 庫存明細列表, shortage_rows: 負庫存警示列表"""
     logger.info("寫入計算結果到Google Sheets...")
     
-    # 寫入庫存預估明細
     try:
-        worksheet = sheets_helper.get_worksheet('庫存預估明細', create_if_not_exists=True)
-        all_data = [INVENTORY_DETAIL_HEADERS] + detail_rows
-        
-        worksheet.clear()
-        if len(all_data) > 0:
-            num_cols = len(INVENTORY_DETAIL_HEADERS)
-            end_col = chr(ord('A') + num_cols - 1)
-            range_name = f'A1:{end_col}{len(all_data)}'
-            worksheet.update(range_name=range_name, values=all_data)
-        
+        write_worksheet_data(sheets_helper, '庫存預估明細', INVENTORY_DETAIL_HEADERS, detail_rows)
         logger.info(f"已寫入 {len(detail_rows)} 筆資料到「庫存預估明細」工作表")
     except Exception as e:
         logger.error(f"寫入「庫存預估明細」工作表失敗: {e}")
         raise
     
-    # 寫入負庫存警示
     try:
-        worksheet = sheets_helper.get_worksheet('負庫存警示', create_if_not_exists=True)
-        all_data = [SHORTAGE_ALERT_HEADERS] + shortage_rows
-        
-        worksheet.clear()
-        if len(all_data) > 0:
-            num_cols = len(SHORTAGE_ALERT_HEADERS)
-            end_col = chr(ord('A') + num_cols - 1)
-            range_name = f'A1:{end_col}{len(all_data)}'
-            worksheet.update(range_name=range_name, values=all_data)
-        
+        write_worksheet_data(sheets_helper, '負庫存警示', SHORTAGE_ALERT_HEADERS, shortage_rows)
         logger.info(f"已寫入 {len(shortage_rows)} 筆資料到「負庫存警示」工作表")
     except Exception as e:
         logger.error(f"寫入「負庫存警示」工作表失敗: {e}")
@@ -377,8 +565,8 @@ def calculate_cookie_inventory():
         logger.info(f"計算基準日期：{format_date(today)}（今天）")
         logger.info(f"計算範圍：未來 {FORECAST_DAYS} 天（從 {format_date(today)} 到 {format_date(end_date)}）")
         
-        # 1. 讀取今天的期初庫存（從Google Sheets讀取「庫存狀態」和「在製品庫存」工作表並合併）
-        # 注意：這兩個工作表的資料應該已經過手動調整（可能先從ERP同步，再手動修改）
+        # 1. 讀取今天的期初庫存（從Google Sheets讀取「庫存狀態」工作表）
+        # 注意：此工作表的資料應該已經過手動調整（可能先從ERP同步，再手動修改）
         initial_inventory = read_initial_inventory(sheets_helper)
         
         # 取得餅乾名稱對應表（用於輸出餅乾品名）
@@ -388,7 +576,7 @@ def calculate_cookie_inventory():
         # 2. 讀取BOM表
         bom = read_bom(sheets_helper)
         
-        # 3. 讀取生產排程（排除今天的投料）
+        # 3. 讀取生產排程（從今天開始之後的投料，包含今天）
         production_schedule = read_production_schedule(sheets_helper, today)
         
         # 4. 讀取組裝排程並展開為餅乾需求
@@ -396,7 +584,7 @@ def calculate_cookie_inventory():
         
         # 5. 計算未來14天的庫存預估
         detail_rows, shortage_rows = calculate_inventory_forecast(
-            initial_inventory,
+            {k: float(v) for k, v in initial_inventory.items()},
             production_schedule,
             assembly_schedule,
             today,
@@ -418,27 +606,26 @@ def calculate_cookie_inventory():
         traceback.print_exc()
         return False
 
-
 if __name__ == '__main__':
     """
-    餅乾庫存算料系統
-    
+    餅乾庫存算料系統    
     功能：
-    - 從Google Sheets讀取今天的期初庫存（合併「庫存狀態」和「在製品庫存」）
+    - 從Google Sheets讀取今天的期初庫存（從「庫存狀態」工作表）
     - 計算未來14天每一天每種餅乾的庫存數量
     - 檢測負庫存（餅乾不足）的情況
-    - 輸出結果到「庫存預估明細」和「負庫存警示」工作表
-    
+    - 輸出結果到「庫存預估明細」和「負庫存警示」工作表    
     執行前準備：
-    1. 執行 sync_inventory_from_erp.py 從ERP同步「庫存狀態」
-    2. 執行 sync_wip_from_erp.py 從ERP同步「在製品庫存」
-    3. 手動調整 Google Sheets 中的上述兩個工作表的資料
-    4. 執行此程式進行計算
-    
+    1. 執行 sync_production_schedule.py 計算並更新生產排程的「生產片數」
+    2. 執行 sync_inventory_from_erp.py 從ERP同步「庫存狀態」（可選）
+    3. 手動調整 Google Sheets 中的「庫存狀態」工作表的資料
+    4. 執行此程式進行計算    
     計算邏輯：
-    - 期初庫存 = 從Google Sheets讀取的「庫存狀態」+「在製品庫存」（已手動調整）
-    - 排除今天的投料記錄（因為已包含在在製品庫存中）
-    - 前置天數固定為5天（投料日期+5天=完工入庫日期）
+    - 期初庫存 = 從Google Sheets讀取的「庫存狀態」（已手動調整）
+    - 生產排程：直接讀取「生產片數」欄位（不需要重新計算）
+    - 只讀取從今天開始之後的投料記錄（包含今天）
+    - 前置天數固定為2天（投料日期+2天=完工入庫日期）
     """
+    import sys
+    # 正常執行模式
     success = calculate_cookie_inventory()
     sys.exit(0 if success else 1)

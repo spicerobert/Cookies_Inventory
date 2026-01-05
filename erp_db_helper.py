@@ -125,26 +125,19 @@ class ERPDBHelper:
             cursor.close()
     
     def get_cookie_inventory(self) -> List[Dict[str, Any]]:
-        """
-        查詢餅乾庫存（從 config.ini 讀取 SQL 查詢）
-        
-        Returns:
-            庫存資料列表，格式: [
-                {
-                    'cookie_code': 'COOKIE001',
+        """查詢餅乾庫存（從 config.ini 讀取 SQL 查詢）
+        Returns:庫存資料列表，格式: [
+                {'cookie_code': 'COOKIE001',
                     'qty': 1000.0,
                     'warehouse_code': 'SP40',
-                    'unit': '片'
-                },
-                ...
-            ]
-        """
+                    'unit': '片',
+                    'cookie_name': '餅乾品名'},...
+            ]"""
         config = configparser.ConfigParser()
         config.read(self.config_file, encoding='utf-8')
         
         if 'ERP_QUERIES' not in config:
-            raise ValueError("config.ini 中缺少 [ERP_QUERIES] 區段")
-        
+            raise ValueError("config.ini 中缺少 [ERP_QUERIES] 區段")        
         query_config = config['ERP_QUERIES']
         cookie_sql = query_config.get('cookie_inventory_query', '')
         
@@ -161,7 +154,8 @@ class ERPDBHelper:
                 'cookie_code': str(row.get('cookie_code', '')).strip(),
                 'qty': row.get('qty', 0),
                 'warehouse_code': str(row.get('warehouse_code', '')).strip(),
-                'unit': str(row.get('unit', '片')).strip()
+                'unit': str(row.get('unit', '片')).strip(),
+                'cookie_name': str(row.get('cookie_name', '')).strip()
             })
         
         return standardized
@@ -175,7 +169,8 @@ class ERPDBHelper:
                 {
                     'cookie_code': 'COOKIE001',
                     'wip_qty': 500.0,
-                    'unit': '片'
+                    'unit': '片',
+                    'cookie_name': '餅乾品名'
                 },
                 ...
             ]
@@ -203,10 +198,55 @@ class ERPDBHelper:
                 'mo_number': str(row.get('mo_number', '')).strip(),
                 'cookie_code': str(row.get('cookie_code', '')).strip(),
                 'wip_qty': row.get('wip_qty', 0),
-                'unit': str(row.get('unit', '片')).strip()
+                'unit': str(row.get('unit', '片')).strip(),
+                'cookie_name': str(row.get('cookie_name', '')).strip()
             })
         
         return standardized
+    
+    def get_item_info_by_codes(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        根據代號列表查詢 INVMB 表的品名、生重、熟重
+        
+        Args:
+            codes: 代號列表
+            
+        Returns:
+            字典：{代號: {'cookie_name': '品名', 'raw_weight': 生重, 'cooked_weight': 熟重}}
+        """
+        if not codes:
+            return {}
+        
+        # 建立 SQL IN 子句（使用安全的字串轉義）
+        # 注意：這裡的代號都是內部系統代號，相對安全
+        safe_codes = [code.replace("'", "''") for code in codes]  # SQL 注入防護
+        codes_str = "','".join(safe_codes)
+        sql = f"""
+            SELECT 
+                MB001 as code,
+                COALESCE(MB002, '') as cookie_name,
+                COALESCE(MB104, 0) as raw_weight,
+                COALESCE(MB105, 0) as cooked_weight
+            FROM [AS_online].[dbo].[INVMB]
+            WHERE MB001 IN ('{codes_str}')
+        """
+        
+        logger.info(f"查詢 {len(codes)} 個代號的品名、生重、熟重資訊...")
+        results = self.execute_query(sql)
+        
+        # 轉換為字典格式
+        info_dict = {}
+        for row in results:
+            code = str(row.get('code', '')).strip()
+            if code:
+                info_dict[code] = {
+                    'cookie_name': str(row.get('cookie_name', '')).strip(),
+                    'raw_weight': float(row.get('raw_weight', 0)) if row.get('raw_weight') else 0.0,
+                    'cooked_weight': float(row.get('cooked_weight', 0)) if row.get('cooked_weight') else 0.0
+                }
+        
+        logger.info(f"成功查詢到 {len(info_dict)} 個代號的資訊")
+        return info_dict
     
     def close(self):
         """關閉資料庫連接"""

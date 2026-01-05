@@ -111,10 +111,6 @@ def sync_wip_inventory() -> bool:
                     if cookie_code and mo_type and mo_number:
                         key = f"{cookie_code}|{mo_type}|{mo_number}"
                         key_to_index[key] = idx            
-            # 取得 Index 字典以便查詢餅乾名稱
-            index_dict = sheets_helper.get_index_dict()
-            cookie_names = index_dict.get('餅乾', {})
-            
             # 準備所有要同步的資料（在記憶體中處理）
             processed_data = {}  # key: "餅乾代號|製令單別|製令單號", value: row_data
             updated_count = 0
@@ -125,8 +121,8 @@ def sync_wip_inventory() -> bool:
                 mo_number = str(item.get('mo_number', '')).strip()
                 if not cookie_code:
                     continue                
-                # 取得餅乾品名
-                cookie_name = cookie_names.get(cookie_code, '')
+                # 從 ERP 查詢結果取得餅乾品名
+                cookie_name = str(item.get('cookie_name', '')).strip()
                 # 取得在製品數量
                 wip_qty = convert_qty_to_float(item.get('wip_qty', 0))
                 unit = str(item.get('unit', '片')).strip()
@@ -169,8 +165,8 @@ def sync_wip_inventory() -> bool:
                         # 如果現有資料沒有餅乾品名欄位（舊資料），需要補充
                         try:
                             float(row[1])  # 如果能轉成數字，則是舊格式
-                            # 舊格式：需要插入餅乾品名
-                            cookie_name = cookie_names.get(cookie_code, '')
+                            # 舊格式：需要插入餅乾品名（由於無法從 ERP 取得，使用空字串）
+                            cookie_name = ''
                             row = [row[0], cookie_name] + row[1:]
                         except (ValueError, TypeError):
                             # 新格式：已經有餅乾品名，不需要處理
