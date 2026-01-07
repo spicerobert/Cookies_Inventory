@@ -7,12 +7,28 @@
 - 按照標準順序重新排列欄位並更新回 Google Sheets"""
 import sys
 from typing import Dict, List, Any
+from datetime import datetime, timedelta
 from google_sheets_helper import GoogleSheetsHelper
 from erp_db_helper import ERPDBHelper
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def _parse_date(date_value: Any) -> datetime | None:
+    """將工作表日期值轉為 datetime（不含時間），失敗則回傳 None。"""
+    if isinstance(date_value, datetime):
+        return datetime(date_value.year, date_value.month, date_value.day)
+    if not date_value:
+        return None
+    try:
+        parts = str(date_value).split('/')
+        if len(parts) == 3:
+            y, m, d = map(int, parts)
+            return datetime(y, m, d)
+    except Exception:
+        return None
+    return None
 
 def read_raw_weight_from_index(sheets_helper: GoogleSheetsHelper) -> Dict[str, float]:
     """從 Index 工作表讀取餅乾的生重資料
@@ -140,8 +156,10 @@ def sync_production_schedule() -> bool:
             # 建立新行（按照標準順序）
             new_row: List[Any] = [''] * len(standard_headers)            
             # 從資料行讀取資料並填入新行
-            if date_idx < len(row):
-                new_row[new_header_to_idx['日期']] = row[date_idx]
+            production_date_raw = row[date_idx] if date_idx < len(row) else ''
+            production_date = _parse_date(production_date_raw)
+            if production_date_raw:
+                new_row[new_header_to_idx['日期']] = production_date_raw
             if line_code_idx < len(row):
                 new_row[new_header_to_idx['產線代號']] = row[line_code_idx]
             if cookie_code_idx < len(row):
@@ -150,8 +168,13 @@ def sync_production_schedule() -> bool:
                 new_row[new_header_to_idx['生產顆數']] = row[pieces_idx]
             if pieces_qty_idx < len(row):
                 new_row[new_header_to_idx['生產片數']] = row[pieces_qty_idx]
-            if completion_date_idx < len(row):
-                new_row[new_header_to_idx['預計完成日期']] = row[completion_date_idx]
+            # 預計完成日期：若欄位有值則採用，否則使用預設「投料日期 + 2 天」
+            completion_date_raw = row[completion_date_idx] if completion_date_idx < len(row) else ''
+            if completion_date_raw:
+                new_row[new_header_to_idx['預計完成日期']] = completion_date_raw
+            elif production_date:
+                default_completion = (production_date + timedelta(days=2)).strftime('%Y/%m/%d')
+                new_row[new_header_to_idx['預計完成日期']] = default_completion
             if status_idx < len(row):
                 new_row[new_header_to_idx['狀態']] = row[status_idx]
             if note_idx < len(row):
