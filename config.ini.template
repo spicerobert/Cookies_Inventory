@@ -1,12 +1,12 @@
 [GOOGLE_SHEETS]
-data_sheet_url = https://docs.google.com/spreadsheets/d/1Xl2g9PB9maA5WRuge284Wmqq1RZDFCWh4UrhpHf8sJI
+data_sheet_url = https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID
 
 [ERP_DATABASE]
 # MS-SQL Server 資料庫連接設定
-server = 192.168.98.10
-database = AS_online
-username = sa
-password = dsc@23225889
+server = YOUR_SERVER_IP
+database = YOUR_DATABASE_NAME
+username = YOUR_USERNAME
+password = YOUR_PASSWORD
 
 [ERP_QUERIES]
 # 自訂 SQL 查詢（可選）

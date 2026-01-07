@@ -3,7 +3,7 @@ ERP 資料庫連接工具模組
 專用於 MS-SQL Server 資料庫連接，用於查詢餅乾庫存
 """
 import configparser
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 
 try:
@@ -12,6 +12,45 @@ except ImportError:
     raise ImportError("請安裝 pyodbc: pip install pyodbc")
 
 logger = logging.getLogger(__name__)
+
+# 預設查詢（移出 config，避免在設定檔暴露 SQL）
+DEFAULT_COOKIE_INVENTORY_QUERY = """
+SELECT 
+    LC.LC001 as cookie_code,
+    LC.LC003 as warehouse_code,
+    LC.LC004 + COALESCE(SUM(LA.LA011 * LA.LA005), 0) as qty,
+    COALESCE(MB.MB004, '片') as unit,
+    COALESCE(MB.MB002, '') as cookie_name
+FROM [AS_online].[dbo].[INVLC] LC
+LEFT JOIN [AS_online].[dbo].[INVLA] LA 
+    ON LA.LA001 = LC.LC001 
+    AND LA.LA009 = LC.LC003
+    AND LA.LA004 >= '20251201'
+LEFT JOIN [AS_online].[dbo].[INVMB] MB
+    ON MB.MB001 = LC.LC001
+WHERE LC.LC001 IS NOT NULL 
+    AND LC.LC002 = '202512' 
+    AND LC.LC003 IN ('SP40', 'SP50', 'SP60', 'SP80')
+GROUP BY LC.LC001, LC.LC003, LC.LC004, MB.MB004, MB.MB002
+"""
+
+DEFAULT_WIP_INVENTORY_QUERY = """
+SELECT 
+    MO.TA001 as mo_number_type,
+    MO.TA002 as mo_number,
+    MO.TA006 as cookie_code,
+    (MO.TA016 - MO.TA017 - ISNULL(MO.TA018, 0)) as wip_qty,
+    COALESCE(MB.MB004, '片') as unit,
+    COALESCE(MB.MB002, '') as cookie_name
+FROM [AS_online].[dbo].[MOCTA] MO
+LEFT JOIN [AS_online].[dbo].[INVMB] MB
+    ON MB.MB001 = MO.TA006
+WHERE MO.TA003 >= '20251101'
+    AND MO.TA011 = '3'
+    AND MO.TA006 IS NOT NULL
+    AND (MO.TA016 - MO.TA017 - ISNULL(MO.TA018, 0)) > 0
+ORDER BY MO.TA006, MO.TA001, MO.TA002
+"""
 
 
 class ERPDBHelper:
@@ -90,7 +129,7 @@ class ERPDBHelper:
         
         raise ValueError(f"找不到可用的 SQL Server ODBC 驅動程式。可用的驅動程式: {', '.join(available_drivers)}")
     
-    def execute_query(self, sql: str, params: tuple = None) -> List[Dict[str, Any]]:
+    def execute_query(self, sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
         """
         執行 SQL 查詢
         
@@ -125,7 +164,8 @@ class ERPDBHelper:
             cursor.close()
     
     def get_cookie_inventory(self) -> List[Dict[str, Any]]:
-        """查詢餅乾庫存（從 config.ini 讀取 SQL 查詢）
+        """查詢餅乾庫存
+        優先使用 config.ini 的自訂 SQL，若無則使用內建預設查詢。
         Returns:庫存資料列表，格式: [
                 {'cookie_code': 'COOKIE001',
                     'qty': 1000.0,
@@ -136,15 +176,16 @@ class ERPDBHelper:
         config = configparser.ConfigParser()
         config.read(self.config_file, encoding='utf-8')
         
-        if 'ERP_QUERIES' not in config:
-            raise ValueError("config.ini 中缺少 [ERP_QUERIES] 區段")        
-        query_config = config['ERP_QUERIES']
-        cookie_sql = query_config.get('cookie_inventory_query', '')
+        cookie_sql = ''
+        if 'ERP_QUERIES' in config:
+            cookie_sql = config['ERP_QUERIES'].get('cookie_inventory_query', '').strip()
         
-        if not cookie_sql:
-            raise ValueError("config.ini 中缺少 cookie_inventory_query 設定")
+        if cookie_sql:
+            logger.info("執行餅乾庫存查詢（使用 config.ini 自訂 SQL）")
+        else:
+            logger.info("執行餅乾庫存查詢（使用內建預設 SQL）")
+            cookie_sql = DEFAULT_COOKIE_INVENTORY_QUERY
         
-        logger.info("執行餅乾庫存查詢")
         results = self.execute_query(cookie_sql)
         
         # 標準化欄位名稱
@@ -162,7 +203,8 @@ class ERPDBHelper:
     
     def get_wip_inventory(self) -> List[Dict[str, Any]]:
         """
-        查詢在製品庫存（從 config.ini 讀取 SQL 查詢）
+        查詢在製品庫存
+        優先使用 config.ini 的自訂 SQL，若無則使用內建預設查詢。
         
         Returns:
             在製品資料列表，格式: [
@@ -178,16 +220,16 @@ class ERPDBHelper:
         config = configparser.ConfigParser()
         config.read(self.config_file, encoding='utf-8')
         
-        if 'ERP_QUERIES' not in config:
-            raise ValueError("config.ini 中缺少 [ERP_QUERIES] 區段")
+        wip_sql = ''
+        if 'ERP_QUERIES' in config:
+            wip_sql = config['ERP_QUERIES'].get('wip_inventory_query', '').strip()
         
-        query_config = config['ERP_QUERIES']
-        wip_sql = query_config.get('wip_inventory_query', '')
+        if wip_sql:
+            logger.info("執行在製品庫存查詢（使用 config.ini 自訂 SQL）")
+        else:
+            logger.info("執行在製品庫存查詢（使用內建預設 SQL）")
+            wip_sql = DEFAULT_WIP_INVENTORY_QUERY
         
-        if not wip_sql:
-            raise ValueError("config.ini 中缺少 wip_inventory_query 設定")
-        
-        logger.info("執行在製品庫存查詢")
         results = self.execute_query(wip_sql)
         
         # 標準化欄位名稱
@@ -247,6 +289,88 @@ class ERPDBHelper:
         
         logger.info(f"成功查詢到 {len(info_dict)} 個代號的資訊")
         return info_dict
+    
+    def get_receipt_data(self, days_back: int = 5) -> List[Dict[str, Any]]:
+        """
+        查詢入庫單表頭和單身資料（合併查詢）
+        
+        查詢條件：
+        - TF003（入庫日期）在從今天到（今天-{days_back}天）這段期間
+        - TF011='P104'
+        - TF001 IN ('5801', '5802')
+        
+        JOIN 條件：
+        - MOCTF.TF001 = MOCTG.TG001（單別相同）
+        - MOCTF.TF002 = MOCTG.TG002（單號相同）
+        
+        Args:
+            days_back: 往前查詢的天數（預設為5天）
+            
+        Returns:
+            入庫單資料列表，格式: [
+                {
+                    'cookie_code': 'TG004',
+                    'cookie_name': 'TG005',
+                    'spec': 'TG006',
+                    'unit': 'TG007',
+                    'receipt_qty': 'TG013',
+                    'receipt_date': 'TF003',
+                    'receipt_type': 'TF001',
+                    'receipt_number': 'TF002'
+                },
+                ...
+            ]
+        """
+        from datetime import datetime, timedelta
+        
+        # 計算日期範圍
+        today = datetime.now()
+        start_date = today - timedelta(days=days_back)
+        
+        # 格式化日期為 YYYYMMDD
+        today_str = today.strftime('%Y%m%d')
+        start_date_str = start_date.strftime('%Y%m%d')
+        
+        sql = f"""
+        SELECT 
+            MOCTG.TG004 as cookie_code,
+            COALESCE(MOCTG.TG005, '') as cookie_name,
+            COALESCE(MOCTG.TG006, '') as spec,
+            COALESCE(MOCTG.TG007, '') as unit,
+            MOCTG.TG013 as receipt_qty,
+            MOCTF.TF003 as receipt_date,
+            MOCTF.TF001 as receipt_type,
+            MOCTF.TF002 as receipt_number
+        FROM [AS_online].[dbo].[MOCTF] MOCTF
+        INNER JOIN [AS_online].[dbo].[MOCTG] MOCTG
+            ON MOCTF.TF001 = MOCTG.TG001
+            AND MOCTF.TF002 = MOCTG.TG002
+        WHERE MOCTF.TF003 >= '{start_date_str}'
+            AND MOCTF.TF003 <= '{today_str}'
+            AND MOCTF.TF011 = 'P104'
+            AND MOCTF.TF001 IN ('5801', '5802')
+        ORDER BY MOCTF.TF003 DESC, MOCTF.TF001, MOCTF.TF002, MOCTG.TG004
+        """
+        
+        logger.info(f"查詢入庫單資料（日期範圍：{start_date_str} 到 {today_str}，TF011='P104'，TF001 IN ('5801', '5802')）...")
+        results = self.execute_query(sql)
+        
+        # 標準化欄位名稱
+        standardized = []
+        for row in results:
+            standardized.append({
+                'cookie_code': str(row.get('cookie_code', '')).strip(),
+                'cookie_name': str(row.get('cookie_name', '')).strip(),
+                'spec': str(row.get('spec', '')).strip(),
+                'unit': str(row.get('unit', '')).strip(),
+                'receipt_qty': float(row.get('receipt_qty', 0)) if row.get('receipt_qty') else 0.0,
+                'receipt_date': str(row.get('receipt_date', '')).strip(),
+                'receipt_type': str(row.get('receipt_type', '')).strip(),
+                'receipt_number': str(row.get('receipt_number', '')).strip()
+            })
+        
+        logger.info(f"成功查詢到 {len(standardized)} 筆入庫單資料")
+        return standardized
     
     def close(self):
         """關閉資料庫連接"""
