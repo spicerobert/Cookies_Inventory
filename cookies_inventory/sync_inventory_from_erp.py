@@ -7,8 +7,8 @@
 import sys
 from datetime import datetime
 from typing import List, Dict, Set, Any
-from google_sheets_helper import GoogleSheetsHelper
-from erp_db_helper import ERPDBHelper
+from .google_sheets_helper import GoogleSheetsHelper
+from .erp_db_helper import ERPDBHelper
 import logging
 
 logging.basicConfig(level=logging.INFO,format='%(asctime)s - %(levelname)s - %(message)s')
@@ -100,13 +100,13 @@ def normalize_cookie_code(cookie_code: str) -> str:
 
 def ensure_headers(worksheet, sheets_helper: GoogleSheetsHelper):
     """確保工作表標題行正確"""
-    existing_data = sheets_helper.read_worksheet('庫存狀態')
+    existing_data = sheets_helper.read_worksheet('帳上庫存')
     if len(existing_data) == 0 or existing_data[0] != INVENTORY_HEADERS:
         worksheet.update(range_name='1:1', values=[INVENTORY_HEADERS])
         logger.info("已更新工作表標題行")
 
 def sync_cookie_inventory() -> bool:
-    """同步餅乾庫存到 Google Sheets 的「庫存狀態」工作表
+    """同步餅乾庫存到 Google Sheets 的「帳上庫存」工作表
     Returns:同步是否成功"""
     logger.info("=" * 60)
     logger.info("開始同步餅乾庫存")
@@ -136,13 +136,13 @@ def sync_cookie_inventory() -> bool:
                 return False
             # 準備更新資料
             update_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            worksheet = sheets_helper.get_worksheet('庫存狀態', create_if_not_exists=True)
+            worksheet = sheets_helper.get_worksheet('帳上庫存', create_if_not_exists=True)
             if worksheet is None:
-                logger.error("無法取得或建立「庫存狀態」工作表")
+                logger.error("無法取得或建立「帳上庫存」工作表")
                 return False
             # 只讀取一次現有資料
-            logger.info("讀取現有庫存資料...")
-            existing_data = sheets_helper.read_worksheet('庫存狀態')
+            logger.info("讀取現有帳上庫存資料...")
+            existing_data = sheets_helper.read_worksheet('帳上庫存')
             # 確保標題行正確
             headers = INVENTORY_HEADERS
             if len(existing_data) == 0 or existing_data[0] != INVENTORY_HEADERS:
@@ -239,10 +239,12 @@ def sync_cookie_inventory() -> bool:
 
 if __name__ == '__main__':
     """
-    從 ERP 系統同步餅乾庫存到 Google Sheets
+    從 ERP 系統同步餅乾庫存到 Google Sheets 的「帳上庫存」工作表
     
     注意：
     - 只同步 Index 工作表中存在的餅乾代號
+    - 同步的資料會寫入「帳上庫存」工作表（這是從 ERP 系統查詢到的帳上庫存資料）
+    - 「實盤庫存」工作表為手動更新，不會被此程式覆蓋
     - 禮盒成品庫存不從 ERP 同步，請手動更新「成品庫存」工作表
     """
     success = sync_cookie_inventory()

@@ -26,7 +26,7 @@ import logging
 from datetime import datetime
 
 # 導入 ERP 資料庫輔助模組
-from erp_db_helper import ERPDBHelper
+from cookies_inventory.erp_db_helper import ERPDBHelper
 
 # ==================== 配置區域 ====================
 # LINE Bot 配置

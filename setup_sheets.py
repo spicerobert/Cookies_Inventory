@@ -2,7 +2,7 @@
 設定 Google Sheets 工作表結構
 執行此腳本將建立系統所需的所有工作表
 """
-from google_sheets_helper import GoogleSheetsHelper, initialize_sheets_structure
+from cookies_inventory.google_sheets_helper import GoogleSheetsHelper, initialize_sheets_structure
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
         print("  2. BOM - 禮盒組成表")
         print("  3. 組裝計劃 - 後段組裝作業排程")
         print("  4. 出貨預測 - 預估出貨計畫")
-        print("  5. 庫存狀態 - 目前餅乾庫存")
+        print("  5. 實盤庫存 - 目前餅乾實盤庫存（手動更新）")
         print("  6. 生產參數 - 餅乾生產規格")
         print("  7. 組裝產能 - 後段組裝線產能")
         print("  8. 產線產能 - 前段生產線產能")
