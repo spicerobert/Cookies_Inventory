@@ -5,8 +5,8 @@
 - 如果 Index 工作表沒有「生重」和「熟重」欄位，會自動新增"""
 import sys
 from typing import List, Dict, Set, Any, Tuple
-from google_sheets_helper import GoogleSheetsHelper
-from erp_db_helper import ERPDBHelper
+from .google_sheets_helper import GoogleSheetsHelper
+from .erp_db_helper import ERPDBHelper
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

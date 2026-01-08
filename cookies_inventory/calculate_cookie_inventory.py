@@ -1,34 +1,30 @@
 """餅乾庫存算料系統
 功能說明：
-- 從Google Sheets讀取今天的期初庫存（從「庫存狀態」工作表）
-  （注意：此工作表的資料應該已經過手動調整）
+- 從Google Sheets讀取今天的期初庫存（從「實盤庫存」工作表）
 - 讀取BOM表、生產排程、組裝排程
-- 計算未來14天每一天每種餅乾的庫存數量
+- 計算未來21天每一天每種餅乾的庫存數量
 - 檢測負庫存（餅乾不足）的情況（包含在「庫存預估明細」工作表的「是否負庫存」和「缺口數量」欄位）
 - 輸出結果到「庫存預估明細」工作表
 執行流程：
-1. 先執行 sync_inventory_from_erp.py 從ERP同步資料(或省略)
-2. 手動更新 Google Sheets 中的「庫存狀態」工作表
-3. 執行此程式計算未來14天的庫存預估
-"""
+1. 確認已經手動更新當天 Google Sheets 中的「實盤庫存」工作表
+2. 執行此程式計算未來14天的庫存預估"""
 import sys
 from datetime import datetime, timedelta
 from typing import List, Dict, Set, Any, Tuple, Union, Optional
 from collections import defaultdict
-from google_sheets_helper import GoogleSheetsHelper
+from .google_sheets_helper import GoogleSheetsHelper
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 前置天數（投料到完工入庫）
+# 預設前置天數（預設投料到完工入庫為2天）
 LEAD_TIME_DAYS = 2
-# 計算天數
+# 預計計算天數（預計計算未來21天庫存預估）
 FORECAST_DAYS = 21
 
-# 輸出工作表標題
-# 欄位順序：期初庫存 → 當天組裝需求 → 預估入庫數量 → 期末庫存
-INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '預估入庫數量', '期末庫存', '是否負庫存', '缺口數量']
+# 庫存預估明細工作表標題
+INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '預估入庫數量', '期末庫存', '是否負庫存', '缺口數量', '更新日期']
 def parse_date(date_str: Any) -> Optional[datetime]:
     """解析日期字串（Google Sheets 格式：YYYY/M/D 或 YYYY/MM/DD）
     支援格式：YYYY/M/D（單數月份和日期，例如：2025/1/5）、YYYY/MM/DD（雙數月份和日期，例如：2025/01/05）
@@ -112,9 +108,9 @@ def parse_float(value: Any) -> float:
         return 0.0
 
 def read_initial_inventory(sheets_helper: GoogleSheetsHelper) -> Dict[str, int]:
-    """讀取今天的期初庫存（從Google Sheets讀取「庫存狀態」工作表）
+    """讀取今天的期初庫存（從Google Sheets讀取「實盤庫存」工作表）
     說明：
-    - 此函數從Google Sheets讀取「庫存狀態」工作表
+    - 此函數從Google Sheets讀取「實盤庫存」工作表
     - 此工作表的資料就是今天的期初庫存數量（例如：1/5的期初庫存）
     - 此工作表的資料應該已經過手動調整（可能先從ERP同步，再手動修改）
     - 多庫別（SP40, SP50, SP60, SP80）會按餅乾代號合併加總
@@ -122,11 +118,11 @@ def read_initial_inventory(sheets_helper: GoogleSheetsHelper) -> Dict[str, int]:
     - 包括負庫存數量也會正確處理和加總
     Args: sheets_helper: Google Sheets 輔助物件    
     Returns: 字典：{餅乾代號: 庫存數量（整數）} - 今天的期初庫存"""
-    logger.info("從Google Sheets讀取今天的期初庫存（從「庫存狀態」工作表）...")
+    logger.info("從Google Sheets讀取今天的期初庫存（從「實盤庫存」工作表）...")
     inventory = defaultdict(int)    
-    # 讀取庫存狀態工作表（多庫別需要按餅乾代號合併加總）
+    # 讀取實盤庫存工作表（多庫別需要按餅乾代號合併加總）
     try:
-        inventory_data = sheets_helper.read_worksheet('庫存狀態')
+        inventory_data = sheets_helper.read_worksheet('實盤庫存')
         if len(inventory_data) > 1:
             headers = inventory_data[0]
             # 找到欄位索引（新格式：餅乾代號、餅乾品名、目前庫存數量、庫別代號、單位、最後更新日期）
@@ -152,9 +148,9 @@ def read_initial_inventory(sheets_helper: GoogleSheetsHelper) -> Dict[str, int]:
                         logger.debug(f"  餅乾代號: {cookie_code}, 庫別代號: {warehouse_code}, 庫存數量: {qty}")
             
             logger.info(f"處理了 {processed_count} 筆庫存記錄，跳過 {skipped_count} 筆（無餅乾代號）")
-            logger.info(f"從「庫存狀態」工作表讀取到 {len(inventory)} 種餅乾的庫存（已按餅乾代號合併加總）")
+            logger.info(f"從「實盤庫存」工作表讀取到 {len(inventory)} 種餅乾的庫存（已按餅乾代號合併加總）")
     except Exception as e:
-        logger.warning(f"讀取「庫存狀態」工作表失敗: {e}")
+        logger.warning(f"讀取「實盤庫存」工作表失敗: {e}")
         import traceback
         traceback.print_exc()
     
@@ -356,7 +352,7 @@ def calculate_daily_inventory(
     """計算單一餅乾在特定日期的庫存變化
     
     計算邏輯：
-    - 期初庫存 = 前一天的期末庫存（第一天使用從「庫存狀態」工作表讀取的期初庫存）
+    - 期初庫存 = 前一天的期末庫存（第一天使用從「實盤庫存」工作表讀取的期初庫存）
     - 當天組裝需求量 = 從組裝排程取得的當天組裝計劃所需的餅乾數量
     - 當天完工入庫數量 = 從生產排程取得的當天預計要完工入庫的餅乾數量（生產排程日期 + 2天 = 完工入庫日期）
     - 期末庫存 = 期初庫存 - 當天組裝計劃所需的餅乾 + 當天預計要完工入庫的餅乾
@@ -387,7 +383,8 @@ def create_detail_row(
     beginning_qty: float,
     completion_qty: float,
     demand_qty: float,
-    ending_qty: float
+    ending_qty: float,
+    update_date: str = ''
 ) -> List[Any]:
     """建立庫存明細記錄
     
@@ -399,6 +396,7 @@ def create_detail_row(
         completion_qty: 預估入庫數量
         demand_qty: 當天組裝需求
         ending_qty: 期末庫存
+        update_date: 更新日期（格式：YYYY-MM-DD HH:MM:SS）
     
     Returns:
         明細記錄列表
@@ -413,7 +411,8 @@ def create_detail_row(
         completion_qty,
         ending_qty,
         '是' if ending_qty < 0 else '否',
-        shortage_qty
+        shortage_qty,
+        update_date
     ]
 
 def calculate_inventory_forecast(
@@ -421,19 +420,21 @@ def calculate_inventory_forecast(
     production_schedule: Dict[datetime, Dict[str, float]],
     assembly_schedule: Dict[datetime, Dict[str, float]],
     today: datetime,
-    cookie_names: Dict[str, str]
+    cookie_names: Dict[str, str],
+    update_date: str = ''
 ) -> List[List[Any]]:
     """計算未來14天的庫存預估    
     計算邏輯：
-    - 從「庫存狀態」工作表讀取今天的期初庫存
+    - 從「實盤庫存」工作表讀取今天的期初庫存
     - 逐日計算每種餅乾的庫存變化：
-      * 期初庫存 = 前一天的期末庫存（第一天使用從「庫存狀態」工作表讀取的期初庫存）
+      * 期初庫存 = 前一天的期末庫存（第一天使用從「實盤庫存」工作表讀取的期初庫存）
       * 當天組裝需求量 = 從組裝排程取得的當天組裝計劃所需的餅乾數量
       * 當天完工入庫數量 = 從生產排程取得的當天預計要完工入庫的餅乾數量（生產排程日期 + 2天 = 完工入庫日期）
       * 期末庫存 = 期初庫存 - 當天組裝計劃所需的餅乾 + 當天預計要完工入庫的餅乾
       * 當天的期末庫存會轉為明天的期初庫存（迭代計算）
     - 在明細記錄中包含「是否負庫存」和「缺口數量」欄位
-    Args: initial_inventory: 期初庫存（從「庫存狀態」工作表讀取的今天的期初庫存）, production_schedule: 生產排程（完工入庫日期: {餅乾代號: 生產數量}，生產排程日期 + 2天 = 完工入庫日期）, assembly_schedule: 組裝排程（組裝日期: {餅乾代號: 需求量}）, today: 今天的日期, cookie_names: 餅乾名稱對應表
+    - 在明細記錄的最後一欄包含「更新日期」
+    Args: initial_inventory: 期初庫存（從「實盤庫存」工作表讀取的今天的期初庫存）, production_schedule: 生產排程（完工入庫日期: {餅乾代號: 生產數量}，生產排程日期 + 2天 = 完工入庫日期）, assembly_schedule: 組裝排程（組裝日期: {餅乾代號: 需求量}）, today: 今天的日期, cookie_names: 餅乾名稱對應表, update_date: 更新日期（格式：YYYY-MM-DD HH:MM:SS）
     Returns: 庫存明細列表"""
     logger.info(f"開始計算未來 {FORECAST_DAYS} 天的庫存預估（前置天數：{LEAD_TIME_DAYS} 天）...")
     
@@ -455,7 +456,8 @@ def calculate_inventory_forecast(
             cookie_name = cookie_names.get(cookie_code, '')
             detail_rows.append(create_detail_row(
                 date, cookie_code, cookie_name,
-                beginning_qty, completion_qty, demand_qty, ending_qty
+                beginning_qty, completion_qty, demand_qty, ending_qty,
+                update_date
             ))
     
     logger.info(f"計算完成：共 {len(detail_rows)} 筆明細記錄")
@@ -520,7 +522,7 @@ def calculate_cookie_inventory():
         logger.info(f"計算基準日期：{format_date(today)}（今天）")
         logger.info(f"計算範圍：未來 {FORECAST_DAYS} 天（從 {format_date(today)} 到 {format_date(end_date)}）")
         
-        # 1. 讀取今天的期初庫存（從Google Sheets讀取「庫存狀態」工作表）
+        # 1. 讀取今天的期初庫存（從Google Sheets讀取「實盤庫存」工作表）
         # 注意：此工作表的資料應該已經過手動調整（可能先從ERP同步，再手動修改）
         initial_inventory = read_initial_inventory(sheets_helper)
         
@@ -538,12 +540,16 @@ def calculate_cookie_inventory():
         assembly_schedule = read_assembly_schedule(sheets_helper, bom)
         
         # 5. 計算未來14天的庫存預估
+        # 產生更新日期
+        update_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         detail_rows = calculate_inventory_forecast(
             {k: float(v) for k, v in initial_inventory.items()},
             production_schedule,
             assembly_schedule,
             today,
-            cookie_names
+            cookie_names,
+            update_date
         )
         
         # 6. 輸出結果
@@ -568,17 +574,17 @@ if __name__ == '__main__':
     """
     餅乾庫存算料系統    
     功能：
-    - 從Google Sheets讀取今天的期初庫存（從「庫存狀態」工作表）
+    - 從Google Sheets讀取今天的期初庫存（從「實盤庫存」工作表）
     - 計算未來14天每一天每種餅乾的庫存數量
     - 檢測負庫存（餅乾不足）的情況（包含在「庫存預估明細」工作表的「是否負庫存」和「缺口數量」欄位）
     - 輸出結果到「庫存預估明細」工作表    
     執行前準備：
     1. 執行 sync_production_schedule.py 計算並更新生產排程的「生產片數」
-    2. 執行 sync_inventory_from_erp.py 從ERP同步「庫存狀態」（可選）
-    3. 手動調整 Google Sheets 中的「庫存狀態」工作表的資料
+    2. 執行 sync_inventory_from_erp.py 從ERP同步「帳上庫存」（可選）
+    3. 手動調整 Google Sheets 中的「實盤庫存」工作表的資料
     4. 執行此程式進行計算    
     計算邏輯：
-    - 期初庫存 = 從Google Sheets讀取的「庫存狀態」（已手動調整）
+    - 期初庫存 = 從Google Sheets讀取的「實盤庫存」（已手動調整）
     - 生產排程：直接讀取「生產片數」欄位（不需要重新計算）
     - 只讀取從今天開始之後的投料記錄（包含今天）
     - 前置天數固定為2天（投料日期+2天=完工入庫日期）

@@ -8,8 +8,8 @@
 import sys
 from typing import Dict, List, Any
 from datetime import datetime, timedelta
-from google_sheets_helper import GoogleSheetsHelper
-from erp_db_helper import ERPDBHelper
+from .google_sheets_helper import GoogleSheetsHelper
+from .erp_db_helper import ERPDBHelper
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
