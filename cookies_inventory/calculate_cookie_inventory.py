@@ -3,7 +3,7 @@
 - 從Google Sheets讀取今天的期初庫存（從「實盤庫存」工作表）
 - 讀取BOM表、生產排程、組裝排程
 - 計算未來21天每一天每種餅乾的庫存數量
-- 檢測負庫存（餅乾不足）的情況（包含在「庫存預估明細」工作表的「是否負庫存」和「缺口數量」欄位）
+- 檢測庫存不足的情況（包含在「庫存預估明細」工作表的「是否庫存不足」和「缺口數量」欄位）
 - 輸出結果到「庫存預估明細」工作表
 執行流程：
 1. 確認已經手動更新當天 Google Sheets 中的「實盤庫存」工作表
@@ -24,7 +24,7 @@ LEAD_TIME_DAYS = 2
 FORECAST_DAYS = 21
 
 # 庫存預估明細工作表標題
-INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '預估入庫數量', '期末庫存', '是否負庫存', '缺口數量', '更新日期']
+INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '預估入庫數量', '期末庫存', '是否庫存不足', '缺口數量', '更新日期']
 def parse_date(date_str: Any) -> Optional[datetime]:
     """解析日期字串（Google Sheets 格式：YYYY/M/D 或 YYYY/MM/DD）
     支援格式：YYYY/M/D（單數月份和日期，例如：2025/1/5）、YYYY/MM/DD（雙數月份和日期，例如：2025/01/05）
@@ -388,6 +388,11 @@ def create_detail_row(
 ) -> List[Any]:
     """建立庫存明細記錄
     
+    計算邏輯：
+    - 庫存不足判斷：當天期初庫存 < 當天組裝需求時，表示庫存不足
+    - 缺口數量 = 當天組裝需求 - 當天期初庫存（當期初庫存不足時）
+    - 注意：當天的預估入庫數量不能提供給當天的組裝需求，需要組裝的所有數量在前一天就要先行入庫
+    
     Args:
         date: 日期
         cookie_code: 餅乾代號
@@ -401,7 +406,10 @@ def create_detail_row(
     Returns:
         明細記錄列表
     """
-    shortage_qty = abs(ending_qty) if ending_qty < 0 else 0.0
+    # 庫存不足判斷：當天期初庫存 < 當天組裝需求
+    is_shortage = beginning_qty < demand_qty
+    # 缺口數量 = 當天組裝需求 - 當天期初庫存（當期初庫存不足時）
+    shortage_qty = (demand_qty - beginning_qty) if is_shortage else 0.0
     return [
         format_date(date),
         cookie_code,
@@ -410,7 +418,7 @@ def create_detail_row(
         demand_qty,
         completion_qty,
         ending_qty,
-        '是' if ending_qty < 0 else '否',
+        '是' if is_shortage else '否',
         shortage_qty,
         update_date
     ]
@@ -432,7 +440,10 @@ def calculate_inventory_forecast(
       * 當天完工入庫數量 = 從生產排程取得的當天預計要完工入庫的餅乾數量（生產排程日期 + 2天 = 完工入庫日期）
       * 期末庫存 = 期初庫存 - 當天組裝計劃所需的餅乾 + 當天預計要完工入庫的餅乾
       * 當天的期末庫存會轉為明天的期初庫存（迭代計算）
-    - 在明細記錄中包含「是否負庫存」和「缺口數量」欄位
+    - 在明細記錄中包含「是否庫存不足」和「缺口數量」欄位
+    - 庫存不足判斷：當天期初庫存 < 當天組裝需求時，表示庫存不足
+    - 缺口數量 = 當天組裝需求 - 當天期初庫存（當期初庫存不足時）
+    - 注意：當天的預估入庫數量不能提供給當天的組裝需求，需要組裝的所有數量在前一天就要先行入庫
     - 在明細記錄的最後一欄包含「更新日期」
     Args: initial_inventory: 期初庫存（從「實盤庫存」工作表讀取的今天的期初庫存）, production_schedule: 生產排程（完工入庫日期: {餅乾代號: 生產數量}，生產排程日期 + 2天 = 完工入庫日期）, assembly_schedule: 組裝排程（組裝日期: {餅乾代號: 需求量}）, today: 今天的日期, cookie_names: 餅乾名稱對應表, update_date: 更新日期（格式：YYYY-MM-DD HH:MM:SS）
     Returns: 庫存明細列表"""
@@ -555,12 +566,12 @@ def calculate_cookie_inventory():
         # 6. 輸出結果
         write_results(sheets_helper, detail_rows)
         
-        # 統計負庫存數量（用於日誌顯示）
-        shortage_count = sum(1 for row in detail_rows if row[7] == '是')  # 第8欄（索引7）為「是否負庫存」
+        # 統計庫存不足數量（用於日誌顯示）
+        shortage_count = sum(1 for row in detail_rows if row[7] == '是')  # 第8欄（索引7）為「是否庫存不足」
         
         logger.info("=" * 60)
         logger.info("計算完成！")
-        logger.info(f"負庫存警示：{shortage_count} 筆（已包含在「庫存預估明細」工作表中）")
+        logger.info(f"庫存不足警示：{shortage_count} 筆（已包含在「庫存預估明細」工作表中）")
         logger.info("=" * 60)
         return True
         
@@ -576,7 +587,7 @@ if __name__ == '__main__':
     功能：
     - 從Google Sheets讀取今天的期初庫存（從「實盤庫存」工作表）
     - 計算未來14天每一天每種餅乾的庫存數量
-    - 檢測負庫存（餅乾不足）的情況（包含在「庫存預估明細」工作表的「是否負庫存」和「缺口數量」欄位）
+    - 檢測庫存不足的情況（包含在「庫存預估明細」工作表的「是否庫存不足」和「缺口數量」欄位）
     - 輸出結果到「庫存預估明細」工作表    
     執行前準備：
     1. 執行 sync_production_schedule.py 計算並更新生產排程的「生產片數」
