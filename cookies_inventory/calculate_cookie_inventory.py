@@ -3,11 +3,11 @@
 - 從Google Sheets讀取今天的期初庫存（從「實盤庫存」工作表）
 - 讀取BOM表、生產排程、組裝排程
 - 計算未來21天每一天每種餅乾的庫存數量
-- 檢測負庫存（餅乾不足）的情況（包含在「庫存預估明細」工作表的「是否負庫存」和「缺口數量」欄位）
 - 輸出結果到「庫存預估明細」工作表
+- 警示餅乾庫存不足的情況（當天組裝需求量 > 期初庫存）
 執行流程：
 1. 確認已經手動更新當天 Google Sheets 中的「實盤庫存」工作表
-2. 執行此程式計算未來14天的庫存預估"""
+2. 執行此程式計算未來21天的庫存預估"""
 import sys
 from datetime import datetime, timedelta
 from typing import List, Dict, Set, Any, Tuple, Union, Optional
@@ -22,12 +22,15 @@ logger = logging.getLogger(__name__)
 LEAD_TIME_DAYS = 2
 # 預計計算天數（預計計算未來21天庫存預估）
 FORECAST_DAYS = 21
-
 # 庫存預估明細工作表標題
 INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '預估入庫數量', '期末庫存', '是否負庫存', '缺口數量', '更新日期']
 def parse_date(date_str: Any) -> Optional[datetime]:
-    """解析日期字串（Google Sheets 格式：YYYY/M/D 或 YYYY/MM/DD）
-    支援格式：YYYY/M/D（單數月份和日期，例如：2025/1/5）、YYYY/MM/DD（雙數月份和日期，例如：2025/01/05）
+    """解析日期字串（Google Sheets 格式：YYYY/M/D 或 YYYY/MM/DD 或 M/D）
+    支援格式：
+    - YYYY/M/D（單數月份和日期，例如：2025/1/5）
+    - YYYY/MM/DD（雙數月份和日期，例如：2025/01/05）
+    - M/D（只有月/日，自動判定為 2026 年，例如：1/5）
+    - M/DD（只有月/日，自動判定為 2026 年，例如：1/15）
     Args:date_str: 日期字串
     Returns: datetime 物件（時間設為00:00:00，只保留日期部分），無法解析則返回 None"""
     if isinstance(date_str, datetime):
@@ -38,11 +41,17 @@ def parse_date(date_str: Any) -> Optional[datetime]:
     try:
         parts = date_str.split('/')
         if len(parts) == 3:
+            # 完整格式：YYYY/M/D 或 YYYY/MM/DD
             year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+            return normalize_date(datetime(year, month, day))
+        elif len(parts) == 2:
+            # 只有月/日格式：M/D 或 M/DD，自動判定為 2026 年
+            month, day = int(parts[0]), int(parts[1])
+            year = 2026
             return normalize_date(datetime(year, month, day))
     except (ValueError, IndexError):
         pass    
-    logger.warning(f"無法解析日期（期望格式：YYYY/M/D 或 YYYY/MM/DD）: {date_str}")
+    logger.warning(f"無法解析日期（期望格式：YYYY/M/D、YYYY/MM/DD、M/D 或 M/DD）: {date_str}")
     return None
 
 def normalize_date(date: datetime) -> datetime:
