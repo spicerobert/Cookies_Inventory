@@ -71,6 +71,8 @@ class GoogleSheetsHelper:
         Returns:
             Worksheet 物件，如果不存在且不建立則返回 None
         """
+        if self.spreadsheet is None:
+            return None
         try:
             return self.spreadsheet.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:
@@ -90,6 +92,8 @@ class GoogleSheetsHelper:
         Returns:
             Worksheet 物件
         """
+        if self.spreadsheet is None:
+            raise ValueError("尚未連接到 Google Sheets")
         try:
             # 如果已存在，先刪除
             existing = self.spreadsheet.worksheet(worksheet_name)
@@ -101,14 +105,9 @@ class GoogleSheetsHelper:
     
     def read_worksheet(self, worksheet_name: str) -> List[List[Any]]:
         """
-        讀取整個工作表的資料
-        
-        Args:
-            worksheet_name: 工作表名稱
-            
-        Returns:
-            二維列表，每一行是一個列表
-        """
+        讀取整個工作表的資料(只取值，而不是物件)        
+        Args: worksheet_name: 工作表名稱            
+        Returns:二維列表，每一行是一個列表"""
         worksheet = self.get_worksheet(worksheet_name)
         if worksheet is None:
             return []
@@ -124,6 +123,8 @@ class GoogleSheetsHelper:
             start_cell: 起始儲存格位置（例如 'A1'）
         """
         worksheet = self.get_worksheet(worksheet_name, create_if_not_exists=True)
+        if worksheet is None:
+            raise ValueError(f"無法取得或建立工作表: {worksheet_name}")
         worksheet.update(range_name=start_cell, values=data)
     
     def append_rows(self, worksheet_name: str, rows: List[List[Any]]):
@@ -135,6 +136,8 @@ class GoogleSheetsHelper:
             rows: 要新增的資料列（二維列表）
         """
         worksheet = self.get_worksheet(worksheet_name, create_if_not_exists=True)
+        if worksheet is None:
+            raise ValueError(f"無法取得或建立工作表: {worksheet_name}")
         worksheet.append_rows(rows)
     
     def clear_worksheet(self, worksheet_name: str):
@@ -158,6 +161,8 @@ class GoogleSheetsHelper:
             value: 要寫入的值
         """
         worksheet = self.get_worksheet(worksheet_name, create_if_not_exists=True)
+        if worksheet is None:
+            raise ValueError(f"無法取得或建立工作表: {worksheet_name}")
         worksheet.update(range_name=cell, values=[[value]])
     
     def list_worksheets(self) -> List[str]:
@@ -167,6 +172,8 @@ class GoogleSheetsHelper:
         Returns:
             工作表名稱列表
         """
+        if self.spreadsheet is None:
+            return []
         return [ws.title for ws in self.spreadsheet.worksheets()]
     
     def get_index_dict(self) -> Dict[str, Dict[str, str]]:
@@ -326,6 +333,9 @@ def initialize_sheets_structure(helper: GoogleSheetsHelper):
 if __name__ == '__main__':
     # 測試功能
     helper = GoogleSheetsHelper()
-    print(f"已連接到試算表: {helper.spreadsheet.title}")
-    print(f"現有工作表: {', '.join(helper.list_worksheets())}")
+    if helper.spreadsheet is None:
+        print("無法連接到試算表")
+    else:
+        print(f"已連接到試算表: {helper.spreadsheet.title}")
+        print(f"現有工作表: {', '.join(helper.list_worksheets())}")
 
