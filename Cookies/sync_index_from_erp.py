@@ -7,10 +7,7 @@ import sys
 from typing import List, Dict, Set, Any, Tuple
 from .google_sheets_helper import GoogleSheetsHelper
 from .erp_db_helper import ERPDBHelper
-import logging
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from .sync_utils import logger, write_worksheet_data
 
 # Index 工作表標準欄位定義
 INDEX_HEADERS = ['類型', '代號', '名稱', '生重', '熟重', '備註']
@@ -126,22 +123,6 @@ def build_updated_row(
     
     return new_row, False
 
-def write_worksheet_data(worksheet, headers: List[str], rows: List[List[Any]]) -> None:
-    """將資料寫入工作表
-    
-    Args:
-        worksheet: Google Sheets 工作表物件
-        headers: 標題行
-        rows: 資料行列表
-    """
-    if not rows or worksheet is None:
-        return
-    
-    final_data = [headers] + rows
-    num_cols = len(headers)
-    end_col = chr(ord('A') + num_cols - 1)
-    range_name = f'A1:{end_col}{len(final_data)}'
-    worksheet.update(range_name=range_name, values=final_data)
 
 def sync_index_from_erp() -> bool:
     """同步品名、生重、熟重到 Google Sheets 的 Index 工作表
@@ -208,7 +189,8 @@ def sync_index_from_erp() -> bool:
                     not_found_count += 1
         
         # 批次更新所有資料
-        write_worksheet_data(worksheet, headers, updated_rows)
+        from .sync_utils import write_worksheet_data
+        write_worksheet_data(worksheet, headers, updated_rows, clear_first=False)
         
         logger.info(f"同步完成: 更新 {updated_count} 筆，未找到 {not_found_count} 筆")
         logger.info("=" * 60)

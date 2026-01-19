@@ -6,6 +6,17 @@
 from .google_sheets_helper import GoogleSheetsHelper, initialize_sheets_structure
 from .erp_db_helper import ERPDBHelper
 
+# 同步共用工具
+from .sync_utils import (
+    convert_qty_to_float,
+    get_cookie_codes_from_index,
+    write_worksheet_data,
+    get_update_date,
+    sync_with_error_handling,
+    filter_data_by_index,
+    format_date_yyyymmdd_to_slash
+)
+
 # 同步功能
 from .sync_index_from_erp import sync_index_from_erp
 from .sync_inventory_from_erp import sync_cookie_inventory
@@ -21,6 +32,14 @@ __all__ = [
     'GoogleSheetsHelper',
     'ERPDBHelper',
     'initialize_sheets_structure',
+    # 同步共用工具
+    'convert_qty_to_float',
+    'get_cookie_codes_from_index',
+    'write_worksheet_data',
+    'get_update_date',
+    'sync_with_error_handling',
+    'filter_data_by_index',
+    'format_date_yyyymmdd_to_slash',
     # 同步功能
     'sync_index_from_erp',
     'sync_cookie_inventory',

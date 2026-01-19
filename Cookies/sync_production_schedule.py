@@ -10,10 +10,7 @@ from typing import Dict, List, Any
 from datetime import datetime, timedelta
 from .google_sheets_helper import GoogleSheetsHelper
 from .erp_db_helper import ERPDBHelper
-import logging
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from .sync_utils import logger, write_worksheet_data
 
 def _parse_date(date_value: Any) -> datetime | None:
     """將工作表日期值轉為 datetime（不含時間），失敗則回傳 None。"""
@@ -223,12 +220,8 @@ def sync_production_schedule() -> bool:
             return False
         
         # 清空工作表並寫入新資料
-        worksheet.clear()
-        if len(updated_rows) > 0:
-            num_cols = len(standard_headers)
-            end_col = chr(ord('A') + num_cols - 1)
-            range_name = f'A1:{end_col}{len(updated_rows)}'
-            worksheet.update(range_name=range_name, values=updated_rows)
+        data_rows = updated_rows[1:]  # 跳過標題行
+        write_worksheet_data(worksheet, standard_headers, data_rows, clear_first=True)
         
         logger.info(f"已成功更新 {len(updated_rows) - 1} 筆資料到生產排程工作表")
         logger.info(f"欄位順序已更新為：{', '.join(standard_headers)}")

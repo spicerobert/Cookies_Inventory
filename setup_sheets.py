@@ -2,7 +2,7 @@
 設定 Google Sheets 工作表結構
 執行此腳本將建立系統所需的所有工作表
 """
-from cookies_inventory.google_sheets_helper import GoogleSheetsHelper, initialize_sheets_structure
+from Cookies.google_sheets_helper import GoogleSheetsHelper, initialize_sheets_structure
 
 
 def main():

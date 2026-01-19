@@ -35,7 +35,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["cookies_inventory"]
+# 將 Cookies 目錄映射為 cookies_inventory 包（打包時使用）
+# 注意：開發環境中需要創建符號連結 cookies_inventory -> Cookies 才能正常導入
+packages = ["Cookies"]
 
 
 

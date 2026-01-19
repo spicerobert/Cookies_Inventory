@@ -14,17 +14,26 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Set, Any, Tuple, Union, Optional
 from collections import defaultdict
 from .google_sheets_helper import GoogleSheetsHelper
-import logging
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from .sync_utils import logger
 
 # 預設前置天數（預設投料到完工入庫為2天）
 LEAD_TIME_DAYS = 2
 # 預計計算天數（預計計算未來21天庫存預估）
 FORECAST_DAYS = 21
 # 庫存預估明細工作表標題
-INVENTORY_DETAIL_HEADERS = ['日期', '餅乾代號', '餅乾品名', '期初庫存', '當天組裝需求', '預估入庫數量', '期末庫存', '是否庫存不足', '缺口數量', '更新日期']
+INVENTORY_DETAIL_HEADERS = [
+    '日期',
+    '餅乾代號',
+    '餅乾品名',
+    '期初庫存',
+    '當天組裝需求',
+    '預估入庫數量',
+    '期末庫存',
+    '是否庫存不足',
+    '缺口數量',
+    '需求來源(禮盒代號|計畫組裝數量)',
+    '更新日期',
+]
 def parse_date(date_str: Any) -> Optional[datetime]:
     """解析日期字串（Google Sheets 格式：YYYY/M/D 或 YYYY/MM/DD 或 M/D）
     支援格式：
@@ -298,12 +307,16 @@ def read_production_schedule(sheets_helper: GoogleSheetsHelper, today: datetime)
     return dict(production)
 
 
-def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dict[str, float]]) -> Dict[datetime, Dict[str, float]]:
-    """讀取組裝排程並展開為餅乾需求量    
+def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dict[str, float]]) -> Tuple[Dict[datetime, Dict[str, float]], Dict[datetime, Dict[str, List[Tuple[str, float]]]]]:
+    """讀取組裝排程並展開為餅乾需求量與來源明細    
     Args:sheets_helper: Google Sheets 輔助物件,bom: BOM表字典
-    Returns:字典：{組裝日期: {餅乾代號: 需求量, ...}}"""
+    Returns:
+        需求量: {組裝日期: {餅乾代號: 需求量, ...}}
+        來源明細: {組裝日期: {餅乾代號: [(禮盒代號, 計畫組裝數量), ...]}}
+    """
     logger.info("讀取組裝排程...")
-    assembly = defaultdict(lambda: defaultdict(float))    
+    assembly = defaultdict(lambda: defaultdict(float))
+    assembly_detail = defaultdict(lambda: defaultdict(list))
     try:
         assembly_data = sheets_helper.read_worksheet('組裝計劃')
         if len(assembly_data) > 1:
@@ -327,6 +340,7 @@ def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dic
                                 for cookie_code, pieces_per_box in bom[box_code].items():
                                     cookie_qty = box_qty * pieces_per_box
                                     assembly[assembly_date_key][cookie_code] += cookie_qty
+                                    assembly_detail[assembly_date_key][cookie_code].append((box_code, box_qty))
                             else:
                                 logger.warning(f"禮盒 {box_code} 在BOM表中找不到")
                     except (ValueError, TypeError):
@@ -335,7 +349,7 @@ def read_assembly_schedule(sheets_helper: GoogleSheetsHelper, bom: Dict[str, Dic
     except Exception as e:
         logger.error(f"讀取組裝排程失敗: {e}")
         raise    
-    return dict(assembly)
+    return dict(assembly), dict(assembly_detail)
 
 def get_all_cookie_codes(
     initial_inventory: Dict[str, float],
@@ -394,6 +408,7 @@ def create_detail_row(
     completion_qty: float,
     demand_qty: float,
     ending_qty: float,
+    demand_detail: List[Tuple[str, float]],
     update_date: str = ''
 ) -> List[Any]:
     """建立庫存明細記錄
@@ -420,6 +435,11 @@ def create_detail_row(
     is_shortage = beginning_qty < demand_qty
     # 缺口數量 = 當天組裝需求 - 當天期初庫存（當期初庫存不足時）
     shortage_qty = (demand_qty - beginning_qty) if is_shortage else 0.0
+    demand_detail_str = ''
+    if demand_detail:
+        demand_detail_str = ' | '.join(
+            f"{box_code}:{int(round(box_qty))}" for box_code, box_qty in demand_detail
+        )
     return [
         format_date(date),
         cookie_code,
@@ -430,6 +450,7 @@ def create_detail_row(
         ending_qty,
         '是' if is_shortage else '否',
         shortage_qty,
+        demand_detail_str,
         update_date
     ]
 
@@ -437,6 +458,7 @@ def calculate_inventory_forecast(
     initial_inventory: Dict[str, Union[int, float]],
     production_schedule: Dict[datetime, Dict[str, float]],
     assembly_schedule: Dict[datetime, Dict[str, float]],
+    assembly_detail: Dict[datetime, Dict[str, List[Tuple[str, float]]]],
     today: datetime,
     cookie_names: Dict[str, str],
     update_date: str = ''
@@ -475,9 +497,11 @@ def calculate_inventory_forecast(
             )
             
             cookie_name = cookie_names.get(cookie_code, '')
+            demand_detail = assembly_detail.get(normalize_date(date), {}).get(cookie_code, [])
             detail_rows.append(create_detail_row(
                 date, cookie_code, cookie_name,
                 beginning_qty, completion_qty, demand_qty, ending_qty,
+                demand_detail,
                 update_date
             ))
     
@@ -558,7 +582,7 @@ def calculate_cookie_inventory():
         production_schedule = read_production_schedule(sheets_helper, today)
         
         # 4. 讀取組裝排程並展開為餅乾需求
-        assembly_schedule = read_assembly_schedule(sheets_helper, bom)
+        assembly_schedule, assembly_detail = read_assembly_schedule(sheets_helper, bom)
         
         # 5. 計算未來14天的庫存預估
         # 產生更新日期
@@ -568,6 +592,7 @@ def calculate_cookie_inventory():
             {k: float(v) for k, v in initial_inventory.items()},
             production_schedule,
             assembly_schedule,
+            assembly_detail,
             today,
             cookie_names,
             update_date
