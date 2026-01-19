@@ -35,7 +35,25 @@ source .venv/Scripts/activate
 source .venv/bin/activate
 ```
 
-### 3. 安裝依賴套件
+### 3. 設置開發環境（重要）
+
+由於專案目錄名為 `Cookies/`，但模組導入使用 `cookies_inventory`，需要在開發環境中創建符號連結：
+
+**Windows (Git Bash 或 PowerShell 管理員模式):**
+```bash
+# 在專案根目錄執行
+mklink /D cookies_inventory Cookies
+```
+
+**Linux/macOS:**
+```bash
+# 在專案根目錄執行
+ln -s Cookies cookies_inventory
+```
+
+這樣就可以在開發環境中使用 `from cookies_inventory.xxx import ...` 了。
+
+### 4. 安裝依賴套件
 
 ```bash
 uv pip install -e .
@@ -47,7 +65,7 @@ uv pip install -e .
 uv pip install pyodbc
 ```
 
-### 4. 設定 Google Sheets
+### 5. 設定 Google Sheets
 
 確保 `config.ini` 中的 Google Sheet URL 正確，並且 `service_account.json` 中的服務帳戶有適當的權限。
 
@@ -346,20 +364,20 @@ python calculate_cookie_inventory.py
 您可以設定定時任務（例如 Windows 工作排程器或 Linux cron）來定期執行同步和計算：
 
 **Windows 工作排程器範例：**
-- 每小時執行一次 ERP 同步：`python E:\Git\Cookies_Inventory\sync_inventory_from_erp.py`
-- 每天執行一次生產片數計算：`python E:\Git\Cookies_Inventory\sync_production_schedule.py`
-- 每天執行一次庫存算料：`python E:\Git\Cookies_Inventory\calculate_cookie_inventory.py`
+- 每小時執行一次 ERP 同步：`python E:\Git\Cookies\sync_inventory_from_erp.py`
+- 每天執行一次生產片數計算：`python E:\Git\Cookies\sync_production_schedule.py`
+- 每天執行一次庫存算料：`python E:\Git\Cookies\calculate_cookie_inventory.py`
 
 **Linux cron 範例：**
 ```bash
 # 每小時執行一次 ERP 同步
-0 * * * * cd /path/to/Cookies_Inventory && python sync_inventory_from_erp.py
+0 * * * * cd /path/to/Cookies && python sync_inventory_from_erp.py
 
 # 每天執行一次生產片數計算
-0 8 * * * cd /path/to/Cookies_Inventory && python sync_production_schedule.py
+0 8 * * * cd /path/to/Cookies && python sync_production_schedule.py
 
 # 每天執行一次庫存算料
-0 9 * * * cd /path/to/Cookies_Inventory && python calculate_cookie_inventory.py
+0 9 * * * cd /path/to/Cookies && python calculate_cookie_inventory.py
 ```
 
 ## 疑難排解
