@@ -13,6 +13,13 @@
 
 本系統使用 **Google Sheets** 作為資料來源和結果輸出的介面，透過 Python 進行資料處理和庫存計算。
 
+### 整合與遷移說明
+
+規劃將餅乾算料與 **Production_Scheduler（gradio_scheduler）** 整合：改為以 **Web UI（Gradio）+ MS-SQL** 為中心，前段餅乾投料生產與後段禮盒組裝共用同一介面與資料庫，**邏輯與流程不變**，僅資料來源由 Google Sheets 改為 MS-SQL。詳細架構、新 schema、後端／前端改寫規格與檢查清單見 **Production_Scheduler** 專案內：
+
+- `gradio_scheduler/docs/COOKIE_INVENTORY_INTEGRATION_ARCHITECTURE.md`
+- `gradio_scheduler/scripts/schema_cookie_inventory.sql`
+
 ## 快速開始
 
 ### 1. 建立虛擬環境 (Python 3.12)
