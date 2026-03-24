@@ -15,10 +15,12 @@
 
 ### 整合與遷移說明
 
-規劃將餅乾算料與 **Production_Scheduler（gradio_scheduler）** 整合：改為以 **Web UI（Gradio）+ MS-SQL** 為中心，前段餅乾投料生產與後段禮盒組裝共用同一介面與資料庫，**邏輯與流程不變**，僅資料來源由 Google Sheets 改為 MS-SQL。詳細架構、新 schema、後端／前端改寫規格與檢查清單見 **Production_Scheduler** 專案內：
+餅乾算料已併入 **Production_Scheduler（gradio_scheduler）**：以 **Web UI（Gradio）+ MS-SQL** 為中心，前段餅乾投料與後段禮盒組裝共用同一介面與資料庫；**邏輯與流程與本專案相同**，資料來源改為 MS-SQL（不再依賴 Google Sheets 主流程）。Gradio 分頁 **「(4)餅乾庫存與算料」** 可一鍵執行算料；詳細架構與 DDL 見 Production_Scheduler 內：
 
 - `gradio_scheduler/docs/COOKIE_INVENTORY_INTEGRATION_ARCHITECTURE.md`
 - `gradio_scheduler/scripts/schema_cookie_inventory.sql`
+- 純計算模組：`gradio_scheduler/backend/logic/cookie_inventory_calc.py`
+- 讀庫與彙總：`gradio_scheduler/backend/services/cookie_inventory_service.py`
 
 ## 快速開始
 
