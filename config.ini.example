@@ -1,0 +1,16 @@
+[GOOGLE_SHEETS]
+data_sheet_url = https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID
+
+[ERP_DATABASE]
+# MS-SQL Server 資料庫連接設定
+server = 192.168.x.x
+database = YOUR_DATABASE_NAME
+username = sa
+password = YOUR_PASSWORD_HERE
+
+[ERP_QUERIES]
+# 自訂 SQL 查詢（可選）
+# 預設查詢已內建於程式碼，通常可留空。
+# 若有特殊需求，可在此覆寫：
+# cookie_inventory_query = YOUR_SQL
+# wip_inventory_query = YOUR_SQL

@@ -201,3 +201,9 @@ marimo/_lsp/
 __marimo__/
 
 service_account.json
+
+# 敏感設定檔（含資料庫密碼）
+config.ini
+
+# 含測試用帳密的腳本
+test_sql_connection.py
